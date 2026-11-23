@@ -1,0 +1,156 @@
+import { DOMParser } from '@xmldom/xmldom';
+import { describe, expect, it, vi } from 'vitest';
+import { consoleLogger, setLogger, type LogPayload } from './logger';
+import { parseWebdavAttachmentInventory } from './webdav-attachment-inventory';
+
+const parseXml = (xml: string) => {
+    const errors: string[] = [];
+    const document = new DOMParser({
+        errorHandler: (level, message) => errors.push(`${level}: ${String(message)}`),
+    }).parseFromString(xml, 'application/xml') as unknown as Document;
+    return { document, errors };
+};
+
+const responseXml = (
+    href: string,
+    options: { collection?: boolean; status?: number } = {},
+): string => {
+    const status = options.status ?? 200;
+    return '<d:response>'
+        + `<d:href>${href}</d:href>`
+        + '<d:propstat><d:prop><d:resourcetype>'
+        + (options.collection ? '<d:collection/>' : '')
+        + `</d:resourcetype></d:prop><d:status>HTTP/1.1 ${status} ${status === 200 ? 'OK' : 'Error'}</d:status></d:propstat>`
+        + '</d:response>';
+};
+
+const multistatusXml = (...responses: string[]): string =>
+    `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">${responses.join('')}</d:multistatus>`;
+
+describe('parseWebdavAttachmentInventory', () => {
+    const collectionUrl = 'https://dav.example.com/mindwtr/attachments/';
+
+    it('requires the exact collection, excludes child collections, and sorts valid keys', () => {
+        const xml = multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml(`${collectionUrl}folder/`, { collection: true }),
+            responseXml(`${collectionUrl}z.bin`),
+            responseXml(`${collectionUrl}a.bin`),
+        );
+
+        expect(parseWebdavAttachmentInventory(xml, collectionUrl, parseXml))
+            .toEqual(['attachments/a.bin', 'attachments/z.bin']);
+    });
+
+    it('accepts a collection href without the trailing slash (#1456)', () => {
+        const bare = '/mindwtr/attachments';
+        const logs: LogPayload[] = [];
+        setLogger((payload) => logs.push(payload));
+        try {
+            expect(parseWebdavAttachmentInventory(multistatusXml(
+                responseXml(bare, { collection: true }),
+            ), collectionUrl, parseXml)).toEqual([]);
+            expect(parseWebdavAttachmentInventory(multistatusXml(
+                responseXml(`https://dav.example.com:443${bare}`, { collection: true }),
+                responseXml(`${bare}/a.bin`),
+                responseXml(`${bare}/folder`, { collection: true }),
+            ), collectionUrl, parseXml)).toEqual(['attachments/a.bin']);
+            expect(logs.filter((log) => log.message === 'WebDAV attachment inventory matched the folder without a trailing slash'))
+                .toMatchObject([
+                    { context: { releaseCheck: 'v1.3.8/webdav-collection-href-no-slash' } },
+                    { context: { releaseCheck: 'v1.3.8/webdav-collection-href-no-slash' } },
+                ]);
+        } finally {
+            setLogger(consoleLogger);
+        }
+    });
+
+    it.each([
+        ['https', '443'],
+        ['http', '80'],
+    ])('normalizes %s origins when the URL implementation retains default ports and host case', (scheme, port) => {
+        class ExplicitOriginURL extends URL {
+            constructor(input: string | URL, base?: string | URL) {
+                super(input, base);
+                const origin = String(input).match(/^https?:\/\/[^/]+/i)?.[0] ?? this.origin;
+                Object.defineProperty(this, 'origin', { value: origin });
+            }
+        }
+        vi.stubGlobal('URL', ExplicitOriginURL);
+        try {
+            expect(parseWebdavAttachmentInventory(multistatusXml(
+                responseXml(`${scheme}://DAV.EXAMPLE.COM:${port}/mindwtr/attachments/`, { collection: true }),
+                responseXml(`${scheme}://dav.example.com/mindwtr/attachments/a.bin`),
+            ), `${scheme}://dav.example.com/mindwtr/attachments/`, parseXml)).toEqual(['attachments/a.bin']);
+        } finally {
+            vi.unstubAllGlobals();
+        }
+    });
+
+    it.each([
+        ['malformed XML', '<d:multistatus xmlns:d="DAV:"><d:response>'],
+        ['wrong namespace', '<d:multistatus xmlns:d="urn:not-dav"/>'],
+        ['no responses', multistatusXml()],
+        ['missing collection response', multistatusXml(responseXml(`${collectionUrl}a.bin`))],
+        ['unmatched origin', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml('https://other.example.com/mindwtr/attachments/a.bin'),
+        )],
+        ['query-bearing href', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml(`${collectionUrl}a.bin?download=1`),
+        )],
+        ['ambiguous href', multistatusXml(
+            `<d:response><d:href>${collectionUrl}</d:href><d:href>${collectionUrl}a.bin</d:href>`
+            + '<d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>'
+            + '<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>',
+        )],
+        ['duplicate href', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml(`${collectionUrl}a.bin`),
+            responseXml(`${collectionUrl}a.bin`),
+        )],
+        ['collection listed with and without the slash', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml('/mindwtr/attachments', { collection: true }),
+        )],
+        ['bare collection href that is not a collection', multistatusXml(
+            responseXml('/mindwtr/attachments'),
+        )],
+        ['sibling sharing the collection prefix', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml('/mindwtr/attachments-old/a.bin'),
+        )],
+        ['other scheme on the same host', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml('http://dav.example.com/mindwtr/attachments/a.bin'),
+        )],
+        ['non-default port on the same host', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml('https://dav.example.com:8443/mindwtr/attachments/a.bin'),
+        )],
+        ['fragment-bearing href', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml(`${collectionUrl}a.bin#fragment`),
+        )],
+        ['failed propstat', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml(`${collectionUrl}a.bin`, { status: 403 }),
+        )],
+        ['nested file', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml(`${collectionUrl}nested/a.bin`),
+        )],
+        ['invalid attachment name', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml(`${collectionUrl}bad%20name.bin`),
+        )],
+        ['malformed escaped href', multistatusXml(
+            responseXml(collectionUrl, { collection: true }),
+            responseXml(`${collectionUrl}%ZZ.bin`),
+        )],
+    ] as const)('fails closed on %s', (_case, xml) => {
+        expect(() => parseWebdavAttachmentInventory(xml, collectionUrl, parseXml))
+            .toThrow(/WebDAV attachment inventory/);
+    });
+});

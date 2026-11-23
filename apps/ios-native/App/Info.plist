@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+      <dict>
+        <key>UTTypeIdentifier</key>
+        <string>tech.dongdongbh.mindwtr.board-order-drag</string>
+        <key>UTTypeConformsTo</key>
+        <array><string>public.data</string></array>
+        <key>UTTypeDescription</key>
+        <string>Board ordering drag data</string>
+      </dict>
+    </array>
+    <key>CFBundleURLTypes</key>
+    <array>
+      <dict>
+        <key>CFBundleURLSchemes</key>
+        <array><string>$(MINDWTR_URL_SCHEME)</string></array>
+      </dict>
+    </array>
+    <key>MindwtrDropboxAppKey</key>
+    <string>$(MINDWTR_DROPBOX_APP_KEY)</string>
+    <key>MindwtrDropboxRedirectURI</key>
+    <string>$(MINDWTR_URL_SCHEME)://redirect</string>
+    <key>MindwtrAnalyticsHeartbeatURL</key>
+    <string>$(MINDWTR_ANALYTICS_HEARTBEAT_URL)</string>
+    <key>MindwtrReleaseVersion</key>
+    <string>$(MINDWTR_RELEASE_VERSION)</string>
+    <key>MindwtrWatchEnabled</key>
+    <true/>
+    <key>MindwtrFeedbackEndpointURL</key>
+    <string>https://feedback.mindwtr.app</string>
+    <key>CFBundleSpokenName</key>
+    <string>Mind Water</string>
+    <key>INAlternativeAppNames</key>
+    <array>
+      <dict>
+        <key>INAlternativeAppName</key>
+        <string>Mind Water</string>
+        <key>INAlternativeAppNamePronunciationHint</key>
+        <string>mind water</string>
+      </dict>
+    </array>
+    <key>NativeCloudKitContainer</key>
+    <string>$(MINDWTR_CLOUDKIT_CONTAINER)</string>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+      <key>UIApplicationSupportsMultipleScenes</key>
+      <false/>
+    </dict>
+    <key>UIApplicationShortcutItems</key>
+    <array>
+      <dict>
+        <key>UIApplicationShortcutItemType</key>
+        <string>tech.dongdongbh.mindwtr.add_task</string>
+        <key>UIApplicationShortcutItemTitle</key>
+        <string>Add task</string>
+        <key>UIApplicationShortcutItemSubtitle</key>
+        <string>Add task to Inbox</string>
+        <key>UIApplicationShortcutItemIconType</key>
+        <string>UIApplicationShortcutIconTypeCompose</string>
+        <key>UIApplicationShortcutItemUserInfo</key>
+        <dict>
+          <key>url</key>
+          <string>$(MINDWTR_URL_SCHEME):///capture-quick?mode=text</string>
+        </dict>
+      </dict>
+      <dict>
+        <key>UIApplicationShortcutItemType</key>
+        <string>tech.dongdongbh.mindwtr.open_focus</string>
+        <key>UIApplicationShortcutItemTitle</key>
+        <string>Focus</string>
+        <key>UIApplicationShortcutItemSubtitle</key>
+        <string>Open Focus view</string>
+        <key>UIApplicationShortcutItemIconType</key>
+        <string>UIApplicationShortcutIconTypeTask</string>
+        <key>UIApplicationShortcutItemUserInfo</key>
+        <dict>
+          <key>url</key>
+          <string>$(MINDWTR_URL_SCHEME):///focus</string>
+        </dict>
+      </dict>
+      <dict>
+        <key>UIApplicationShortcutItemType</key>
+        <string>tech.dongdongbh.mindwtr.open_calendar</string>
+        <key>UIApplicationShortcutItemTitle</key>
+        <string>Calendar</string>
+        <key>UIApplicationShortcutItemSubtitle</key>
+        <string>Open Calendar view</string>
+        <key>UIApplicationShortcutItemIconType</key>
+        <string>UIApplicationShortcutIconTypeDate</string>
+        <key>UIApplicationShortcutItemUserInfo</key>
+        <dict>
+          <key>url</key>
+          <string>$(MINDWTR_URL_SCHEME):///calendar</string>
+        </dict>
+      </dict>
+    </array>
+    <key>UIBackgroundModes</key>
+    <array>
+      <string>processing</string>
+      <string>remote-notification</string>
+    </array>
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+      <string>com.expo.modules.backgroundtask.processing</string>
+    </array>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Mindwtr uses the microphone to capture voice notes.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Mindwtr needs reminders access to import your chosen Apple Reminders capture list into Inbox.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Mindwtr needs reminders access to import your chosen Apple Reminders capture list into Inbox.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Mindwtr needs calendar access to show your events alongside tasks.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Mindwtr needs calendar access to show your events alongside tasks.</string>
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Mindwtr uses Face ID to unlock the app when app lock is enabled.</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>vi</string>
+		<string>zh-Hans</string>
+		<string>zh-Hant</string>
+		<string>es</string>
+		<string>hu</string>
+		<string>uk</string>
+		<string>hi</string>
+		<string>ar</string>
+		<string>de</string>
+		<string>ru</string>
+		<string>ja</string>
+		<string>fr</string>
+		<string>pt</string>
+		<string>pl</string>
+		<string>cs</string>
+		<string>ko</string>
+		<string>it</string>
+		<string>tr</string>
+		<string>nl</string>
+		<string>fa</string>
+		<string>sv</string>
+		<string>da</string>
+	</array>
+</dict>
+</plist>

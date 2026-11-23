@@ -1,0 +1,156 @@
+name: "\U0001F41B Bug Report"
+description: Create a report to help us improve Mindwtr
+title: "[BUG] "
+labels: ["bug", "status:needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Please include diagnostics logs with your bug report.** Logs are especially important for sync, reminders, crashes, and problems we cannot reproduce. They help us identify what happened and avoid a round of follow-up questions.
+
+        In **Settings → Data → Diagnostics**, enable **Debug logging**, reproduce the problem if safe, then use **Share log** (mobile) or **Save log** (desktop). Attach the exported file below. If you cannot collect logs, explain why in the diagnostics field; you can still submit the report.
+  - type: markdown
+    attributes:
+      value: |
+        If this is mainly a sync or data problem, the **Sync / Data Issue** form gets it triaged faster.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options:
+        - "Desktop (Linux)"
+        - "Desktop (macOS)"
+        - "Desktop (Windows)"
+        - "Mobile (Android)"
+        - "Mobile (iOS)"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - "Sync / data consistency"
+        - "UI / interaction"
+        - "Projects / areas / sections"
+        - "Search / filter"
+        - "Settings / preferences"
+        - "Notifications / reminders"
+        - "Recurrence / calendar"
+        - "Attachments"
+        - "Audio / transcription"
+        - "Other"
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Shown in Settings → About. A commit hash is fine for a source build.
+      placeholder: v1.3.1
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Install channel
+      multiple: true
+      options:
+        - "Play Store"
+        - "F-Droid"
+        - "App Store (iOS)"
+        - "TestFlight"
+        - "Mac App Store"
+        - "Microsoft Store"
+        - "winget"
+        - "Homebrew"
+        - "Flathub"
+        - "APT"
+        - "AUR"
+        - "Nix (community flake)"
+        - "Snap Store (snapcraft)"
+        - "Distro package"
+        - "Release file (.deb / .rpm / AppImage / .dmg / .exe / .msi / APK)"
+        - "Source / dev build"
+        - "Other"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS version
+      placeholder: Android 15, Windows 11, Arch Linux (Hyprland)
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Only for mobile.
+      placeholder: Pixel 8
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact
+      multiple: true
+      options:
+        - "Blocks core workflow"
+        - "Data loss or data mismatch"
+        - "Crash / freeze"
+        - "Visual issue only"
+        - "Other"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What is the bug?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: regression
+    attributes:
+      label: Last version where this worked
+      description: Leave empty if it never worked or you do not know.
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics logs (strongly recommended)
+      description: |
+        Attach the log file by dragging it into this box. Include the approximate time of the problem and your timezone. For problems involving multiple devices, attach a log from each affected device and identify which is which.
+
+        Logs stay on your device until you share them and redact common credentials. Review files before posting: GitHub issues are public. Do not attach a full task database or backup. Instructions: https://docs.mindwtr.app/data-sync/diagnostics-logs
+
+        If logs are unavailable, explain why (for example, the app will not open). For a purely visual issue, a screenshot or recording plus a short explanation is fine.
+      placeholder: Attach logs here, or explain why you cannot provide them.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots / screen recording
+      description: |
+        Screenshots or a short recording. Drag files into the box to attach them.
+
+        **Recording without your private tasks:** **Settings → Data → Open sandbox**, then **Enter sandbox**. It loads fictional tasks; leave it from the sandbox banner. Sample data may not reproduce a bug that involves your own data, attachments or sync.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context

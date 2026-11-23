@@ -1,0 +1,680 @@
+# Mindwtr MCP Server
+
+MCP server for Mindwtr. Connect MCP clients (Claude Desktop, etc.) to your local SQLite database, the desktop Local API, or a self-hosted Mindwtr Cloud endpoint.
+
+By default this is a **stdio** server: MCP clients launch it as a subprocess and talk over JSON-RPC on stdin/stdout. It also has an opt-in **HTTP transport** (see [Remote access (HTTP)](#remote-access-http)) for self-hosters who want to expose it at a URL instead.
+
+---
+
+## App Binaries vs. MCP Helper
+
+The desktop app includes a built-in MCP server in **Settings → Integrations → Local MCP server (advanced)**. It requires no separately installed runtime or helper. The desktop installer does not add a standalone `mindwtr-mcp` command to your `PATH`; mobile apps do not host MCP.
+
+You do **not** need to run the whole app from source to use MCP. You can use the normal desktop app binary for your tasks, then run this separate MCP helper from the repository with Bun, or build the helper once and run it with Node. Point the helper at the desktop app's local `mindwtr.db`, or use the Local API backend below.
+
+On desktop, find the database in the default database locations listed under [Requirements](#requirements). Mobile binaries do not expose a local MCP server surface.
+
+---
+
+## Requirements
+
+These requirements apply to the standalone helper, not the built-in desktop server.
+
+- Node.js 20+ to run the helper. Prefer Node.js 22+ for prebuilt SQLite binaries on supported platforms; Node 20 requires a native build toolchain.
+- Node-based SQLite mode uses the optional better-sqlite3 native addon. API-only installs can omit it with `--omit=optional`. If no prebuilt binary is available for your platform, npm needs a working C/C++ build toolchain and Python for node-gyp.
+- Bun (recommended for development in this repo)
+- A local database (`mindwtr.db`) for SQLite mode, a running desktop Local API and bearer token for API mode, or a self-hosted Mindwtr Cloud URL and bearer token for Cloud mode
+
+For **SQLite mode with npm 12**, approve the SQLite dependency's install script; otherwise a successful install can still fail at startup with a missing native binding. For `npx` or global installs, allow only `better-sqlite3`:
+
+```bash
+npx --allow-scripts=better-sqlite3 -y mindwtr-mcp --db "/path/to/mindwtr.db"
+npm install -g --allow-scripts=better-sqlite3 mindwtr-mcp
+```
+
+In MCP client configurations using `npx`, add `"--allow-scripts=better-sqlite3"` before `"mindwtr-mcp"` in `args`. For an existing project-local install, run `npm install-scripts approve better-sqlite3`, then `npm rebuild better-sqlite3` from that project. Review the dependency before approving; do not enable all dependency scripts.
+
+Default database locations. The installed Windows and macOS apps keep the database in a `data` subfolder from version 1.3.2 on; Linux and the portable builds are unchanged. The server looks in both places, so it finds the database either way.
+
+- Linux: `~/.local/share/mindwtr/mindwtr.db` (Flatpak: `~/.var/app/tech.dongdongbh.mindwtr/data/mindwtr/mindwtr.db`; Snap: `~/snap/mindwtr/current/.local/share/mindwtr/mindwtr.db`)
+- macOS, 1.3.2 and later: `~/Library/Application Support/mindwtr/data/mindwtr.db`
+- macOS, 1.3.1 and earlier: `~/Library/Application Support/mindwtr/mindwtr.db`
+- Windows, 1.3.2 and later: `%APPDATA%\mindwtr\data\mindwtr.db`
+- Windows, 1.3.1 and earlier: `%APPDATA%\mindwtr\mindwtr.db`
+
+Additional macOS paths for sandboxed builds:
+- 1.3.2 and later: `~/Library/Containers/tech.dongdongbh.mindwtr/Data/Library/Application Support/mindwtr/data/mindwtr.db`
+- 1.3.1 and earlier: `~/Library/Containers/tech.dongdongbh.mindwtr/Data/Library/Application Support/mindwtr/mindwtr.db`
+
+A `--db` path pinned in an MCP client configuration keeps working across that move: if the file is not at the configured path, the server checks the matching `data` subfolder (or the parent folder) and reports on stderr which database it opened.
+
+If `mindwtr.db` is missing but `data.json` exists in the same desktop data folder, the MCP server will bootstrap a fresh SQLite database from that local data snapshot on first start.
+The desktop data folder is the folder that holds `mindwtr.db` in the default locations above.
+
+You can override local mode with:
+- `--db /path/to/mindwtr.db`
+- `MINDWTR_DB_PATH=/path/to/mindwtr.db`
+- `MINDWTR_DB=/path/to/mindwtr.db`
+
+For self-hosted Cloud mode, use:
+- `--cloud-url https://mindwtr.example.com` or `MINDWTR_MCP_CLOUD_URL`
+- `--cloud-token <token>` or `MINDWTR_MCP_CLOUD_TOKEN`
+- optional `--cloud-allow-insecure-http=true` for trusted private HTTP deployments
+
+---
+
+## Start / Stop
+
+### Run from npm
+
+After installing the published package, run it directly:
+
+```bash
+mindwtr-mcp --db "/path/to/mindwtr.db"
+```
+
+Or let an MCP client launch it through npx:
+
+```json
+{
+  "mcpServers": {
+    "mindwtr": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mindwtr-mcp",
+        "--db",
+        "~/.local/share/mindwtr/mindwtr.db"
+      ]
+    }
+  }
+}
+```
+
+The npm package is read-only by default. Add `--write` only when you explicitly want add/update/complete/delete tools enabled.
+
+### Container (Cloud/API only)
+
+Use `ghcr.io/dongdongbh/mindwtr-mcp:1.1.15`. Image tags follow the **MCP helper version**, not the desktop version. The image supports Linux amd64 and arm64, runs as a non-root user, and needs no writable volume. It omits the optional SQLite addon: direct database mode is unsupported. Connect to Cloud through its API; never mount the Cloud data directory into this container.
+
+Set `MINDWTR_MCP_CLOUD_URL` and `MINDWTR_MCP_CLOUD_TOKEN` in the launching environment, then let your MCP client run:
+
+```bash
+docker run --rm -i --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  -e MINDWTR_MCP_CLOUD_URL -e MINDWTR_MCP_CLOUD_TOKEN \
+  ghcr.io/dongdongbh/mindwtr-mcp:1.1.15
+```
+
+Podman accepts the same arguments. Keep stdin open with `-i`; do not allocate a TTY (`-t`). Stdio needs no published port. Add `--write` after the image name only to enable mutations. HTTPS is the default; trusted private HTTP Cloud deployments must explicitly add `--cloud-allow-insecure-http=true`. Backend errors never switch to a local database. Local API mode retains its loopback-only URL restriction, so a separate container network cannot reach a desktop API through an arbitrary service hostname.
+
+For ToolHive on Kubernetes, start with [`docker/mcp/toolhive.yaml`](../../docker/mcp/toolhive.yaml). Install the [ToolHive operator](https://docs.stacklok.com/toolhive/guides-k8s/quickstart), create a Kubernetes Secret named `mindwtr-cloud` with a `token` entry in the same namespace, and replace the example HTTPS Cloud URL before applying the manifest. ToolHive attaches to stdio; no MCP HTTP listener is needed. Use `spec.args: ["--write"]` only when writes are intended, and allow outbound access to the Cloud endpoint in your network policy. No shared task volume is required.
+
+For direct Streamable HTTP, use a separate randomly generated `MINDWTR_MCP_HTTP_TOKEN` of at least 16 characters:
+
+```bash
+docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  -p 127.0.0.1:8722:8722 \
+  -e MINDWTR_MCP_CLOUD_URL -e MINDWTR_MCP_CLOUD_TOKEN \
+  -e MINDWTR_MCP_HTTP_TOKEN \
+  ghcr.io/dongdongbh/mindwtr-mcp:1.1.15 --http --http-host 0.0.0.0
+```
+
+Clients connect to `/mcp` with the HTTP token. The Cloud token authenticates outgoing requests; the HTTP token authenticates incoming MCP clients. Keep them distinct. Use a TLS reverse proxy for remote access. The host port above is published only on loopback.
+
+### Desktop Local API mode
+
+The updated Bun API helper also supplies task versions and protected writes. Keep version tokens with the server and workspace that issued them; they are not portable between implementations. Its create receipts are separate local records with the same seven-day retention and 10,000-live-receipt limit. Check the connected server’s health capabilities; the helper does not advertise desktop conditional task-list GET support.
+
+> Requires mindwtr-mcp 1.1.11 or later.
+
+Enable the desktop app's **Local API** in Settings and copy its bearer token. Keep the app and API running. This backend uses the app's REST endpoints and never opens a database or falls back to SQLite.
+
+For an API-only installation, omit the optional native SQLite addon:
+
+```bash
+npm install -g --omit=optional mindwtr-mcp
+```
+
+Configure your MCP client to pass the token through its environment, rather than putting it in command-line arguments:
+
+```json
+{
+  "command": "mindwtr-mcp",
+  "args": ["--api-url", "http://127.0.0.1:3456"],
+  "env": {
+    "MINDWTR_MCP_API_TOKEN": "<token from desktop settings>"
+  }
+}
+```
+
+Use the port shown in Settings. `MINDWTR_MCP_API_URL` can replace `--api-url`. URLs must use literal `127.0.0.1` or `[::1]`, with no credentials, path, query or fragment; redirects are refused. Do not combine API and Cloud/`--db` options. Existing database-path environment variables are ignored in API mode.
+
+Writes remain disabled unless explicitly enabled with `--write`. If the app is closed or the token is invalid, the helper returns an error. A timed-out write may have reached the app: inspect the task before retrying, as the helper does not retry writes automatically.
+
+Desktop 1.3.8 adds optional protection for task creation and edits in Local API mode:
+
+- `mindwtr_add_task` accepts `idempotencyKey`, 1–128 visible ASCII characters without spaces. Keep the same key and identical input when retrying an uncertain create, including attachment links. The desktop retains the original result for seven days, even if that task is later edited or deleted. Different input with the same key returns `idempotency_conflict`. A full receipt store returns `idempotency_capacity`; retry later with the same key and input.
+- `mindwtr_get_task`, task creation, and task edits return `{ "task": { ... }, "version": "sha256-..." }`. Pass the version unchanged as `expectedVersion` to `mindwtr_update_task`. A stale edit returns `task_version_conflict`; read the task again and review the changes before retrying. An edit that changes nothing preserves the version.
+
+The next desktop release also returns a sibling `versions` map from `mindwtr_list_tasks`, keyed by task ID, so conditional edits do not need a separate read for every listed task. `mindwtr_complete_task` accepts optional `expectedVersion` in Local API mode and uses a protected `/v2` endpoint; a stale completion makes no changes or recurring successor. The built-in desktop MCP server supports the same condition on `mindwtr_archive_task`. Task objects remain unchanged in list responses.
+
+Both arguments are optional. Without them, writes keep their existing behavior. Protected requests use versioned desktop endpoints and fail on older desktop versions without falling back to an unprotected write. Older desktop reads can omit `version`. These arguments are unavailable in Cloud and direct SQLite mode; unsupported task input fields are rejected. Attachment replacement and lifecycle restrictions below still apply.
+
+| MCP capability | Desktop Local API support |
+| --- | --- |
+| List/get tasks | Supported, including rich search operators, date filters, sorting and pagination |
+| Create tasks | Explicit title and fields; `quickAdd` is unavailable |
+| Update/complete/delete/restore tasks | Supported through the API's corresponding endpoints; terminal status changes cannot be submitted as ordinary edits |
+| List/get/create/update/delete projects | Supported for the API's basic project fields: title, color, status, Area and sequential behavior |
+| List/create areas | Supported; creation reuses a live same-name area unchanged or restores a deleted same-name identity |
+| View section catalogue and project assignments | Unavailable; task assignments by known ID are supported |
+| Sections, managed people, remaining Area writes | Section/people lists are supported; single lookups and remaining writes are unavailable |
+| GTD availability `view` | Unavailable because the API does not expose the required view-section and settings snapshot |
+| Replacing attachment links | Unavailable because the API does not provide conditional attachment updates |
+
+`mindwtr_reopen_task` is available in Local API mode for ordinary done/archived tasks. Supply `{id,status?,expectedVersion?}`; status defaults to `next` and accepts `inbox`, `next`, `waiting`, or `someday`. It uses the new `/tasks/:id/reopen` endpoint without fallback, returns the task/version, and checks the optional condition inside the SQLite transaction. A retry already at that target is unchanged. A different active status conflicts. Parent reactivation restores only eligible archive-owned sections and keeps finished siblings finished. Deleted/purged tasks and terminal tasks with any non-null recurrence metadata are refused; the latter return `recurrence_requires_app` and require the app. This operation does not restore Trash.
+
+`mindwtr_add_area` accepts `{name,color?,icon?}`. Names are trimmed, limited to 200 UTF-16 units, and matched without case. A live match wins over a deleted match and returns unchanged with response-only `existing: true`, ignoring supplied props. A deleted match retains its ID and restores only children carrying its exact legacy cascade deletion timestamp. Independently deleted and detached children stay as they are; supplied color respects project color overrides. Fresh creation follows all retained areas in order. These effects commit atomically and require write permission. Area update/delete remain unavailable in Local API mode.
+
+Other unsupported fields are rejected before a write. The desktop API's recurrence limitations also apply; some recurring completions must be performed in the app. This backend does not promise full SQLite/Cloud tool parity.
+
+`--api-url` selects the helper's **data source**. `--http` instead selects how an MCP client connects **to the helper**; it can be used with any backend and has a separate authentication token.
+
+### Self-hosted Cloud mode
+
+Use Cloud mode when you run your own Mindwtr Cloud server and want MCP tools without pointing the helper at a local SQLite database:
+
+```bash
+MINDWTR_MCP_CLOUD_TOKEN="$MINDWTR_TOKEN" \
+npx -y mindwtr-mcp \
+  --cloud-url "https://mindwtr.example.com"
+```
+
+Pass bearer tokens through the environment to keep them out of process arguments. The `--cloud-token` flag remains supported. You can also pass the URL through the environment:
+
+```bash
+MINDWTR_MCP_CLOUD_URL="https://mindwtr.example.com" \
+MINDWTR_MCP_CLOUD_TOKEN="$MINDWTR_TOKEN" \
+npx -y mindwtr-mcp
+```
+
+Cloud mode uses the self-hosted Cloud API. Reads come from the current `/v1/data` snapshot; with `--write`, task/project/section/area writes go through the Cloud server's per-resource REST endpoints (`POST /v1/tasks`, `PATCH /v1/tasks/:id`, and so on), so they get the same validation and revision stamping as any other client. Without `--write`, write tools return `read_only`. Person edits and restoring deleted tasks are not available in Cloud mode yet.
+
+This does not make Mindwtr Cloud itself a hosted MCP server. It is still the same stdio helper, backed by a Cloud URL that you operate.
+
+For private HTTP test deployments, local/private HTTP URLs are allowed by the shared Cloud client rules. Use `--cloud-allow-insecure-http=true` only for a self-hosted endpoint you intentionally trust.
+
+### Remote access (HTTP)
+
+By default `mindwtr-mcp` only speaks stdio. Pass `--http` to also (instead of stdio) serve a stateless streamable-HTTP MCP endpoint, so you can point a remote MCP client at a URL — the motivating case is [Gemini Spark](https://gemini.google.com) "custom apps", which take an MCP server URL. HTTP mode works with all three backends.
+
+```bash
+export MINDWTR_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
+mindwtr-mcp --http --db "/path/to/mindwtr.db"
+```
+
+Configure the remote MCP client with the same token from `MINDWTR_MCP_HTTP_TOKEN`. Use a randomly generated token; the minimum length does not guarantee a strong secret. Passing it through the environment keeps it out of process arguments; `--http-token` remains supported.
+
+Flags (all have `MINDWTR_MCP_HTTP*` env var equivalents):
+
+- `--http` / `MINDWTR_MCP_HTTP` — enable HTTP mode. Also implied by setting `--http-host`, `--http-port`, or `--http-token`.
+- `--http-token <token>` / `MINDWTR_MCP_HTTP_TOKEN` — **required** whenever HTTP mode is on, at least 16 characters. Generate one with `openssl rand -hex 32`. The server refuses to start without it — there is no way to expose HTTP mode unauthenticated, even on loopback.
+- `--http-host <host>` / `MINDWTR_MCP_HTTP_HOST` — bind address, default `127.0.0.1`.
+- `--http-port <port>` / `MINDWTR_MCP_HTTP_PORT` — bind port, default `8722`.
+
+The desktop app's built-in MCP server also uses port `8722`. If it is on, pass another port with `--http-port`, for example `--http-port 8723`.
+
+The MCP endpoint is `POST /mcp` and requires `Authorization: Bearer <token>` on every request; `GET /healthz` returns `200 ok` without auth for reverse-proxy health checks. Requests without a valid token get `401`; repeated authentication failures get `429` with a `Retry-After` header. This response does not block further token checks: a valid token still succeeds, so it is not a brute-force lockout. Bodies over 1 MiB get `413`. When HTTP mode is on, the server does not also connect a stdio transport — it stays alive as long as the HTTP server is listening, not stdin.
+
+There is no built-in TLS termination or rate limiting for authenticated requests. If you're exposing this beyond localhost, put a reverse proxy (e.g. Caddy, nginx) in front for TLS and put the resulting `https://` URL (plus your token) into the remote MCP client.
+
+### Run directly from the repo
+
+```bash
+# from repo root (read-only by default)
+bun run mindwtr:mcp -- --db "/path/to/mindwtr.db"
+```
+
+Enable writes (required for add/update/complete/delete tools):
+
+```bash
+bun run mindwtr:mcp -- --db "/path/to/mindwtr.db" --write
+```
+
+Stop:
+- Press `Ctrl+C` in the terminal.
+
+### Keep-alive behavior (why it sometimes exits)
+
+The MCP server is **stdio‑based**. It stays alive as long as stdin is open.
+If your shell/client closes stdin, the process exits.
+
+To force an immediate exit when stdin closes (no keep-alive), pass `--nowait`:
+
+```bash
+bun run mindwtr:mcp -- --db "/path/to/mindwtr.db" --nowait
+```
+
+Note: When an MCP client launches the server, it keeps stdin open, so the server should remain connected.
+
+### Run without the helper script
+
+```bash
+bun run --filter mindwtr-mcp dev -- --db "/path/to/mindwtr.db"
+```
+
+Stop:
+- Press `Ctrl+C` in the terminal.
+
+### Build and run the binary entry (Node)
+
+```bash
+# from repo root
+bun run --filter mindwtr-mcp build
+node apps/mcp-server/dist/cli.js --db "/path/to/mindwtr.db"
+```
+
+Stop:
+- Press `Ctrl+C` in the terminal.
+
+---
+
+## Why `mindwtr-mcp` is “command not found”
+
+`mindwtr-mcp` is the package binary. It exists after installing the npm package globally, after an MCP client launches it through `npx`, or after you build the source package and run it with Node.
+
+Use one of these source-tree options instead:
+
+```bash
+# ✅ works immediately
+bun run mindwtr:mcp -- --db "/path/to/mindwtr.db"
+
+# ✅ build then run
+bun run --filter mindwtr-mcp build
+node apps/mcp-server/dist/cli.js --db "/path/to/mindwtr.db"
+```
+
+### Optional: create a global `mindwtr-mcp` command
+
+If you want a real `mindwtr-mcp` command on your PATH, create a tiny wrapper:
+
+```bash
+cat > ~/bin/mindwtr-mcp <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /absolute/path/to/Mindwtr
+exec bun run mindwtr:mcp -- "$@"
+EOF
+chmod +x ~/bin/mindwtr-mcp
+```
+
+Then use:
+
+```bash
+mindwtr-mcp --db "/path/to/mindwtr.db"
+```
+
+### Desktop app toggle?
+
+The desktop app has **Settings → Integrations → Local MCP server (advanced)**. Access is disabled and read-only by default. Enable it and copy connection details for a client supporting authenticated Streamable HTTP. The default endpoint is `http://127.0.0.1:8722/mcp`; **Advanced** lets you choose a port from 1024 to 65535. Save the port, then update your client's connection details. The server remains bound to loopback.
+
+Starting with v1.3.7, **Allow task and project edits** permits creating, editing, completing, and restoring tasks, and creating or editing projects. **Advanced** has separate **Allow archiving** and **Allow deletion** permissions. Each permission is independent; all start off on a new installation. Existing installations that enabled **Allow changes** retain their previous deletion permission, which can now be disabled separately. Archiving requires an explicit new grant. Updates that combine ordinary edits with archive/cancellation changes require both permissions. The dedicated `mindwtr_archive_task` tool uses the app's archive operation without completing the task or generating a recurring occurrence. Deletion remains soft deletion.
+
+**Copy for Codex** provides TOML for `~/.codex/config.toml`. Add or replace the `mcp_servers.mindwtr` entry while preserving your other configuration; Mindwtr does not edit that file. **Copy connection details** retains the JSON format for clients using `mcpServers`. Both include a private bearer token. Connected AI clients can read exposed Mindwtr data and may send it to their provider. Regenerating the token disconnects old clients.
+
+The built-in server runs inside the desktop app and shares its task and project operations with the Local API. You do not need to enable the Local API. Closing to the tray keeps it running; disabling MCP or quitting stops it. A startup failure or occupied port is shown in Settings with Retry. This mode does not provide remote ChatGPT access, a tunnel, or hosting. The standalone helper's backend-specific capabilities and `--write` flag are separate from these desktop permissions.
+
+Source builds compile the built-in server with the desktop Rust application; no separate MCP executable or runtime is bundled.
+
+---
+
+## MCP Client Configuration
+
+MCP clients run the server as a subprocess. You point them to **the command** and pass args/env.
+
+**Important:** Do NOT use `bun run mindwtr:mcp` for MCP clients. The `bun run` wrapper outputs shell messages to stdout (e.g., `$ bun run --filter...`) which breaks the JSON-RPC protocol. Always run bun directly on the source file.
+
+### Example (generic MCP config)
+
+```json
+{
+  "mcpServers": {
+    "mindwtr": {
+      "command": "bun",
+      "args": [
+        "/absolute/path/to/Mindwtr/apps/mcp-server/src/cli.ts",
+        "--db",
+        "~/.local/share/mindwtr/mindwtr.db"
+      ]
+    }
+  }
+}
+```
+
+Add `--write` to the args if you want to enable **add/update/complete/delete** tools.
+
+If your client doesn't support Bun, build first and use Node:
+
+```bash
+# Build once
+cd /path/to/Mindwtr && bun run --filter mindwtr-mcp build
+```
+
+```json
+{
+  "mcpServers": {
+    "mindwtr": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/Mindwtr/apps/mcp-server/dist/cli.js",
+        "--db",
+        "~/.local/share/mindwtr/mindwtr.db"
+      ]
+    }
+  }
+}
+```
+
+Add `--write` to the args if you want to enable **add/update/complete/delete** tools.
+
+### Claude Desktop
+
+Claude Desktop supports MCP (stdio). Add a server entry in its MCP configuration.
+
+Typical config file locations:
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+After editing, fully quit and relaunch Claude Desktop.
+
+### Claude Code (CLI)
+
+Add a server via the CLI:
+
+```bash
+claude mcp add mindwtr -- \
+  bun /path/to/Mindwtr/apps/mcp-server/src/cli.ts --db "/path/to/mindwtr.db" --write
+```
+
+Or edit `~/.claude.json` directly:
+
+```json
+{
+  "projects": {
+    "/path/to/your/project": {
+      "mcpServers": {
+        "mindwtr": {
+          "type": "stdio",
+          "command": "bun",
+          "args": [
+            "/absolute/path/to/Mindwtr/apps/mcp-server/src/cli.ts",
+            "--db",
+            "~/.local/share/mindwtr/mindwtr.db",
+            "--write"
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+Then restart the Claude Code session and run `/mcp` to verify it's connected.
+
+### OpenAI Codex (config.toml)
+
+Codex stores MCP config in `~/.codex/config.toml`. Add:
+
+```toml
+[mcp_servers.mindwtr]
+command = "bun"
+args = ["/absolute/path/to/Mindwtr/apps/mcp-server/src/cli.ts", "--db", "/path/to/mindwtr.db", "--write"]
+
+# Optional: pass env vars to the server
+[mcp_servers.mindwtr.env]
+MINDWTR_DB_PATH = "/path/to/mindwtr.db"
+```
+
+Restart Codex after saving.
+
+### Gemini CLI
+
+Gemini CLI uses a JSON `settings.json` with `mcpServers`, either:
+- User scope: `~/.gemini/settings.json`
+- Project scope: `.gemini/settings.json` in your repo
+
+You can add Mindwtr MCP two ways:
+
+**1) CLI (recommended):**
+
+```bash
+gemini mcp add mindwtr \
+  bun /absolute/path/to/Mindwtr/apps/mcp-server/src/cli.ts \
+  --db "/path/to/mindwtr.db" --write
+```
+
+**2) Edit settings.json manually:**
+
+```json
+{
+  "mcpServers": {
+    "mindwtr": {
+      "command": "bun",
+      "args": ["/absolute/path/to/Mindwtr/apps/mcp-server/src/cli.ts", "--db", "/path/to/mindwtr.db", "--write"]
+    }
+  }
+}
+```
+
+Restart the Gemini CLI session after saving.
+
+### Other MCP clients
+
+Any MCP-compatible client can work as long as it can launch a **stdio** server with the command + args above.
+
+---
+
+## Migration: tool rename (`mindwtr.*` → `mindwtr_*`)
+
+> **Breaking change** (introduced in this release): all tool names have changed from dot-notation (`mindwtr.list_tasks`) to underscore-notation (`mindwtr_list_tasks`) to comply with MCP client validation rules (e.g. Claude Desktop).
+
+**Old → new mapping:**
+
+| Old name                  | New name                   |
+| ------------------------- | -------------------------- |
+| `mindwtr.list_tasks`      | `mindwtr_list_tasks`       |
+| `mindwtr.list_projects`   | `mindwtr_list_projects`    |
+| `mindwtr.get_project`     | `mindwtr_get_project`      |
+| `mindwtr.get_task`        | `mindwtr_get_task`         |
+| `mindwtr.list_areas`      | `mindwtr_list_areas`       |
+| `mindwtr.add_task`        | `mindwtr_add_task`         |
+| `mindwtr.update_task`     | `mindwtr_update_task`      |
+| `mindwtr.complete_task`   | `mindwtr_complete_task`    |
+| `mindwtr.delete_task`     | `mindwtr_delete_task`      |
+| `mindwtr.restore_task`    | `mindwtr_restore_task`     |
+| `mindwtr.add_project`     | `mindwtr_add_project`      |
+| `mindwtr.update_project`  | `mindwtr_update_project`   |
+| `mindwtr.delete_project`  | `mindwtr_delete_project`   |
+| `mindwtr.add_area`        | `mindwtr_add_area`         |
+| `mindwtr.update_area`     | `mindwtr_update_area`      |
+| `mindwtr.delete_area`     | `mindwtr_delete_area`      |
+
+**Upgrade action:** find and replace `mindwtr.` with `mindwtr_` in any MCP client configs, system prompts, scripts, or automations that reference these tool names. No other changes are required.
+
+---
+
+## Tools
+
+- `mindwtr_list_tasks`
+  - Input: `{ status?, projectId?, includeDeleted?, limit?, offset?, search?, dueDateFrom?, dueDateTo?, isFocusedToday?, view?, sortBy?, sortOrder? }`
+  - `view` narrows by GTD availability: `available`, `deferred` or `blocked`
+- `mindwtr_list_projects`
+  - Input: `{}`
+- `mindwtr_get_project`
+  - Input: `{ id, includeDeleted? }`
+- `mindwtr_list_view_sections` — view section IDs, titles and order; optional `view`: `someday`, `waiting`, or `focus` (SQLite/Cloud)
+- `mindwtr_list_sections`
+  - Input: `{ projectId?, includeDeleted? }`
+- `mindwtr_get_section`
+  - Input: `{ id, includeDeleted? }`
+- `mindwtr_list_areas`
+  - Input: `{}`
+- `mindwtr_list_people`
+  - Input: `{ includeDeleted? }`
+- `mindwtr_get_person`
+  - Input: `{ id, includeDeleted? }`
+- `mindwtr_get_task`
+  - Input: `{ id, includeDeleted? }`
+- `mindwtr_add_task` **(requires `--write`)**
+  - Input: `{ title? | quickAdd?, status?, projectId?, sectionId?, viewSectionIds?, areaId?, dueDate?, startTime?, cancelledAt?, reviewAt?, recurrence?, contexts?, tags?, description?, priority?, energyLevel?, assignedTo?, timeEstimate?, taskMode?, relativeStartOffset?, showFutureRecurrence?, pushCount?, checklist?, textDirection?, location?, isFocusedToday?, timeSpentMinutes?, suppressMindwtrReminders?, reminderPolicy?, repeatReminderMinutes?, dueReminderLeadMinutes?, startReminderLeadMinutes?, attachments? }`
+- `mindwtr_update_task` **(requires `--write`)**
+  - Input: `{ id, title?, status?, projectId?, sectionId?, viewSectionIds?, areaId?, dueDate?, startTime?, cancelledAt?, reviewAt?, recurrence?, contexts?, tags?, description?, priority?, energyLevel?, assignedTo?, timeEstimate?, taskMode?, relativeStartOffset?, showFutureRecurrence?, pushCount?, checklist?, textDirection?, location?, isFocusedToday?, timeSpentMinutes?, suppressMindwtrReminders?, reminderPolicy?, repeatReminderMinutes?, dueReminderLeadMinutes?, startReminderLeadMinutes?, order?, boardOrder?, focusOrder?, attachments? }`
+  - `startReminderLeadMinutes`: `0` (Off), `5`, `15`, `30`, or `60` minutes before an explicit start time. Omitted legacy values remain off; date-only starts do not schedule an alert.
+  - `reminderPolicy` accepts `inherit`, `send`, or `skip` for start/due reminders. Use `inherit` to follow the library default; `null` is not accepted. Existing tasks retain their legacy reminder choice until explicitly changed.
+  - `recurrence` accepts a recurrence object or an RFC 5545 RRULE string. Pass `null` to clear it.
+  - `attachments` holds link attachments only (`{ id?, title?, uri }`, e.g. `obsidian://`, `file://` or `https://`). The list you pass is the complete set of links: links you leave out are removed, file attachments are never touched, and `null` clears every link.
+  - `cancelledAt` is an ISO timestamp with timezone. Setting it closes the task as cancelled (`archived`) without counting it as completed or generating its next recurrence. Moving it to an active status or completing it clears cancellation. Update every syncing client before using cancellation; older writers can discard the marker.
+- `mindwtr_complete_task` **(requires `--write`)**
+  - Input: `{ id }`
+- `mindwtr_delete_task` **(requires `--write`)**
+  - Input: `{ id }`
+- `mindwtr_restore_task` **(requires `--write`)**
+  - Input: `{ id }`
+- `mindwtr_add_project` **(requires `--write`)**
+  - Input: `{ title, color?, status?, areaId?, isSequential?, isFocused?, viewSectionIds?, dueDate?, startDate?, cancelledAt?, reviewAt?, supportNotes?, attachments? }`
+- `mindwtr_update_project` **(requires `--write`)**
+  - Input: `{ id, title?, color?, status?, areaId?, isSequential?, isFocused?, viewSectionIds?, dueDate?, startDate?, cancelledAt?, reviewAt?, supportNotes?, attachments? }`
+  - `attachments` follows the same rule as `mindwtr_update_task`: link attachments only, the list is the complete set of links, and `null` clears them.
+- `mindwtr_delete_project` **(requires `--write`)**
+  - Input: `{ id }`
+- `mindwtr_add_section` **(requires `--write`)**
+  - Input: `{ projectId, title, description?, order?, isCollapsed? }`
+- `mindwtr_update_section` **(requires `--write`)**
+  - Input: `{ id, title?, description?, order?, isCollapsed? }`
+- `mindwtr_delete_section` **(requires `--write`)**
+  - Input: `{ id }`
+- `mindwtr_add_area` **(requires `--write`)**
+  - Input: `{ name, color?, icon? }`
+- `mindwtr_update_area` **(requires `--write`)**
+  - Input: `{ id, name?, color?, icon? }`
+- `mindwtr_delete_area` **(requires `--write`)**
+  - Input: `{ id }`
+- `mindwtr_add_person` **(requires `--write`)**
+  - Input: `{ name, note?, referenceLink? }`
+- `mindwtr_update_person` **(requires `--write`)**
+  - Input: `{ id, name?, note?, referenceLink? }`
+- `mindwtr_rename_person` **(requires `--write`)**
+  - Input: `{ id, name, updateTasks? }`
+- `mindwtr_delete_person` **(requires `--write`)**
+  - Input: `{ id }`
+
+All tools return JSON text payloads with the resulting task, project, section, area, person, or collection payload.
+
+---
+
+## Testing
+
+### Quick smoke test (CLI)
+
+1) Start the server (read‑only):
+```bash
+bun run mindwtr:mcp -- --db "~/.local/share/mindwtr/mindwtr.db"
+```
+
+2) Connect via your MCP client and run:
+- `mindwtr_list_tasks` (limit 5)
+
+If you want to test writes, restart with `--write`:
+```bash
+bun run mindwtr:mcp -- --db "~/.local/share/mindwtr/mindwtr.db" --write
+```
+
+Then test:
+- `mindwtr_add_task` (quickAdd: "Test task @home /due:tomorrow")
+- `mindwtr_complete_task` (use returned task id)
+- `mindwtr_update_task` (e.g. set status or dueDate)
+- `mindwtr_delete_task` (use returned task id)
+- `mindwtr_get_task` (use returned task id)
+- `mindwtr_restore_task` (after delete, restore the task)
+- `mindwtr_list_projects`
+- `mindwtr_get_project` (use returned project id)
+- `mindwtr_list_areas`
+- `mindwtr_list_people`
+- `mindwtr_add_project`
+- `mindwtr_update_project`
+- `mindwtr_delete_project`
+- `mindwtr_add_area`
+- `mindwtr_update_area`
+- `mindwtr_delete_area`
+- `mindwtr_add_person`
+- `mindwtr_update_person`
+- `mindwtr_rename_person`
+- `mindwtr_get_person` (use returned person id)
+- `mindwtr_delete_person`
+- `mindwtr_list_tasks` with `dueDateFrom`, `dueDateTo`, `sortBy`, `sortOrder`
+
+If the list returns tasks and add/complete works, the server is healthy.
+
+### Stdio JSON-RPC E2E (transport validation)
+
+Use any MCP client or a small script to send:
+- `initialize`
+- `notifications/initialized`
+- `tools/list`
+- `tools/call` (e.g. `mindwtr_list_projects` or `mindwtr_list_tasks`)
+
+If these succeed, the stdio transport is working end-to-end.
+
+### Claude Code sanity check
+
+1) Add the server:
+```bash
+claude mcp add mindwtr -- \
+  bun /path/to/Mindwtr/apps/mcp-server/src/cli.ts --db "/path/to/mindwtr.db" --write
+```
+2) Restart Claude Code, run `/mcp`, and verify **mindwtr** is connected.
+3) Ask the model to call:
+   - `mindwtr_list_tasks` (limit 5)
+   - `mindwtr_add_task` (quickAdd: "Test MCP @home /due:tomorrow")
+   - `mindwtr_complete_task` (use returned id)
+
+---
+
+## Safety & Concurrency
+
+The SQLite details below apply to direct database mode. Local API mode uses the desktop app's native handlers, and Cloud mode uses the self-hosted server.
+
+- The server uses **SQLite WAL mode**. Read-only tools can run while the desktop app is open.
+- Write tools fail fast on SQLite writer locks, then retry the whole Mindwtr write operation. Each retry reloads current data before applying the requested change, so a delayed MCP write does not keep working from a stale pre-lock snapshot.
+- Writes are **disabled by default**. Use `--write` to enable edits.
+- Write operations go through the shared **@mindwtr/core** store to enforce business rules (both Bun and Node).
+- SQL is reserved for read-heavy paths (list/search) where performance matters.
+- Do not point a separate container/server deployment at the same local storage or sync data while the desktop app is also writing. That creates independent writers outside the local SQLite coordination path and is unsupported.
+
+---
+
+## Notes
+
+- This MCP server targets the SQLite database used by the desktop app, with mutations routed through `@mindwtr/core`.
+- Keep an eye on schema changes across app versions (update queries if needed).
+
+### View section assignments
+
+In SQLite and Cloud mode, call `mindwtr_list_view_sections` (optionally with
+`{"view":"someday"}`) to resolve section IDs and titles. The result is
+`{"viewSections":[{"view":"someday","id":"books","title":"Books","order":0}]}`.
+These are view headings, separate from project sections returned by
+`mindwtr_list_sections`. Create or rename view headings in the Mindwtr app.
+
+Task and project create/update tools accept `viewSectionIds`, for example
+`{"someday":"books","waiting":"people"}`. Assigning a heading does not change
+the entity's status. Updates replace the **whole map**: include other view
+assignments you want to retain. Omit the field to preserve assignments; pass
+`{}` or, on update, `null` to clear all assignments. To clear one view, send the
+map containing only the other assignments. Values must be nonempty section-ID
+strings; unknown view names remain supported for compatibility with newer apps.
+
+The catalogue works in read-only mode. Assignment writes require `--write`.
+Cloud mode uses the existing data endpoint and works with Mindwtr Cloud 1.3.7.
+Desktop Local API mode supports task assignments by known ID, but does not expose
+the view section catalogue or project assignments; unsupported inputs are rejected.

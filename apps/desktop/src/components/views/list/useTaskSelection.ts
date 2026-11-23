@@ -1,0 +1,400 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+    batchUpdateTasksFromLatest,
+    buildBulkOrganizeTaskUpdate,
+    buildBulkOrganizeTaskUpdates,
+    buildBulkTaskTokenUpdates,
+    buildTaskMovePatch,
+    isBulkOrganizeSelectionCurrent,
+    logStaleWriteRefused,
+    resolveFeatureFlags,
+    runStoreCommand,
+    updateRangeSelection,
+    useTaskStore,
+    type BulkOrganizeSelectionScope,
+    type BulkOrganizeTaskUpdateInput,
+    type RangeSelectionOptions,
+    type Task,
+    type TaskEnergyLevel,
+    type TaskMoveDestination,
+    type TaskStatus,
+} from '@mindwtr/core';
+import { reportError } from '../../../lib/report-error';
+import { registerUndoableAction } from '../../../lib/undo-registry';
+import { useSelectedTasksCsvExport } from './useSelectedTasksCsvExport';
+import { useInboxCompletion } from '../../../contexts/inbox-session-context';
+
+type TaskUpdate = { id: string; updates: Partial<Task> };
+type TaskLookup = Map<string, Task> | Record<string, Task | undefined>;
+type TaskSelectionAction = 'delete' | 'move' | 'organize' | 'update';
+type ShowToast = (
+    message: string,
+    tone?: 'success' | 'error' | 'info',
+    durationMs?: number,
+    action?: { label: string; onClick: () => void },
+) => void;
+
+type TaskSelectionActions = {
+    batchDeleteTasks?: (taskIds: string[]) => Promise<unknown> | unknown;
+    batchMoveTasks?: (taskIds: string[], newStatus: TaskStatus) => Promise<unknown> | unknown;
+    batchUpdateTasks?: (updates: TaskUpdate[]) => Promise<unknown> | unknown;
+    onActionError?: (action: TaskSelectionAction, error: unknown) => void;
+    organizeScope?: BulkOrganizeSelectionScope;
+    restoreTask?: (taskId: string) => Promise<unknown> | unknown;
+    showToast?: ShowToast;
+    t?: (key: string) => string;
+    tasksById?: TaskLookup;
+    undoNotificationsEnabled?: boolean;
+};
+
+type RunActionOptions = {
+    afterSuccess?: () => void;
+    confirm?: () => Promise<boolean>;
+};
+
+type TokenActionOptions = Omit<RunActionOptions, 'confirm'> & {
+    afterNoop?: () => void;
+};
+
+function assertTaskActionSucceeded(result: unknown): void {
+    if (
+        result
+        && typeof result === 'object'
+        && 'success' in result
+        && result.success === false
+    ) {
+        const error = 'error' in result && typeof result.error === 'string'
+            ? result.error
+            : '';
+        throw new Error(error);
+    }
+}
+
+export async function restoreDeletedTasksWithFeedback(
+    taskIds: string[],
+    restoreTask: (taskId: string) => Promise<unknown> | unknown,
+    showToast: ShowToast,
+): Promise<void> {
+    try {
+        const results = await Promise.all(taskIds.map((taskId) => restoreTask(taskId)));
+        results.forEach(assertTaskActionSucceeded);
+    } catch (error) {
+        reportError('Failed to restore deleted tasks', error);
+        const message = error instanceof Error && error.message
+            ? error.message
+            : 'Failed to restore deleted tasks';
+        showToast(message, 'error');
+    }
+}
+
+export function useTaskSelection(
+    visibleIds: string[],
+    actions: TaskSelectionActions = {},
+) {
+    const trackInboxCompletion = useInboxCompletion();
+    const {
+        batchDeleteTasks,
+        batchMoveTasks,
+        batchUpdateTasks,
+        onActionError,
+        organizeScope,
+        restoreTask,
+        showToast,
+        t,
+        tasksById,
+        undoNotificationsEnabled = true,
+    } = actions;
+    const [selectionMode, setSelectionMode] = useState(false);
+    const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
+    const [activeAction, setActiveAction] = useState<TaskSelectionAction | null>(null);
+    const anchorIdRef = useRef<string | null>(null);
+    const activeActionRef = useRef<TaskSelectionAction | null>(null);
+
+    const visibleIdSet = useMemo(() => new Set(visibleIds), [visibleIds]);
+
+
+    const selectedIdsArray = useMemo(
+        () => Array.from(multiSelectedIds).filter((id) => visibleIdSet.has(id)),
+        [multiSelectedIds, visibleIdSet],
+    );
+    const selectedVisibleCount = selectedIdsArray.length;
+    const allVisibleTasksSelected = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+    const { exportSelectedTasks, isExporting } = useSelectedTasksCsvExport(selectedIdsArray, {
+        showToast,
+        t,
+    });
+
+    useEffect(() => {
+        setMultiSelectedIds((previous) => {
+            const next = new Set(Array.from(previous).filter((id) => visibleIdSet.has(id)));
+            return next.size === previous.size ? previous : next;
+        });
+        if (anchorIdRef.current && !visibleIdSet.has(anchorIdRef.current)) {
+            anchorIdRef.current = null;
+        }
+    }, [visibleIdSet]);
+
+    const exitSelectionMode = useCallback(() => {
+        setSelectionMode(false);
+        setMultiSelectedIds(new Set());
+        anchorIdRef.current = null;
+    }, []);
+
+    const toggleSelectionMode = useCallback(() => {
+        if (selectionMode) {
+            exitSelectionMode();
+            return;
+        }
+        setSelectionMode(true);
+    }, [exitSelectionMode, selectionMode]);
+
+    const toggleMultiSelect = useCallback((taskId: string, options: RangeSelectionOptions = {}) => {
+        if (!visibleIdSet.has(taskId)) return;
+        const anchorId = anchorIdRef.current;
+        anchorIdRef.current = taskId;
+        setMultiSelectedIds((previous) => {
+            const result = updateRangeSelection({
+                anchorId,
+                range: options.range,
+                selectedIds: previous,
+                targetId: taskId,
+                visibleIds,
+            });
+            setSelectionMode(result.selectedIds.size > 0);
+            return result.selectedIds;
+        });
+    }, [visibleIds, visibleIdSet]);
+
+    const selectAllVisibleTasks = useCallback(() => {
+        setSelectionMode(true);
+        anchorIdRef.current = visibleIds[0] ?? null;
+        setMultiSelectedIds(new Set(visibleIds));
+    }, [visibleIds]);
+
+    const clearTaskSelection = useCallback(() => {
+        anchorIdRef.current = null;
+        setMultiSelectedIds(new Set());
+    }, []);
+
+    const translate = useCallback((key: string, fallback: string) => {
+        const value = t?.(key);
+        return value && value !== key ? value : fallback;
+    }, [t]);
+
+    const runSelectedTaskAction = useCallback(async (
+        action: TaskSelectionAction,
+        write: (taskIds: string[]) => Promise<unknown> | unknown,
+        options: RunActionOptions = {},
+    ): Promise<boolean> => {
+        if (selectedIdsArray.length === 0 || activeActionRef.current) return false;
+        if (options.confirm && !(await options.confirm())) return false;
+
+        const taskIds = [...selectedIdsArray];
+        activeActionRef.current = action;
+        setActiveAction(action);
+        try {
+            assertTaskActionSucceeded(await Promise.resolve(write(taskIds)));
+            options.afterSuccess?.();
+            exitSelectionMode();
+            return true;
+        } catch (error) {
+            if (onActionError) {
+                onActionError(action, error);
+            } else {
+                reportError(`Failed to ${action} selected tasks`, error);
+            }
+            const failure = action === 'delete'
+                ? translate('bulk.deleteFailed', 'Failed to delete selected tasks')
+                : action === 'organize'
+                    ? error instanceof Error && error.message === 'STALE_REVISION'
+                        ? translate('bulk.selectionChanged', 'The selected tasks or filters changed. Review the selection and try again.')
+                        : translate('bulk.organizeFailed', 'Failed to organize selected tasks')
+                    : action === 'move'
+                        ? translate('bulk.moveFailed', 'Failed to move selected tasks')
+                        : translate('bulk.updateFailed', 'Failed to update selected tasks');
+            showToast?.(failure, 'error');
+            return false;
+        } finally {
+            activeActionRef.current = null;
+            setActiveAction(null);
+        }
+    }, [exitSelectionMode, onActionError, selectedIdsArray, showToast, translate]);
+
+    const moveSelectedTasks = useCallback((
+        newStatus: TaskStatus,
+        options?: Omit<RunActionOptions, 'confirm'>,
+    ) => {
+        if (!batchMoveTasks) return Promise.resolve(false);
+        return runSelectedTaskAction(
+            'move',
+            (taskIds) => newStatus === 'done'
+                ? trackInboxCompletion(taskIds, () => batchMoveTasks(taskIds, newStatus))
+                : batchMoveTasks(taskIds, newStatus),
+            options,
+        );
+    }, [batchMoveTasks, runSelectedTaskAction, trackInboxCompletion]);
+
+    const deleteSelectedTasks = useCallback((options?: RunActionOptions) => {
+        if (!batchDeleteTasks) return Promise.resolve(false);
+        const deletedIds = [...selectedIdsArray];
+        return runSelectedTaskAction('delete', batchDeleteTasks, {
+            confirm: options?.confirm,
+            afterSuccess: () => {
+                if (restoreTask) {
+                    const undo = registerUndoableAction(() => {
+                        void restoreDeletedTasksWithFeedback(
+                            deletedIds,
+                            restoreTask,
+                            showToast ?? (() => undefined),
+                        );
+                    });
+                    if (undoNotificationsEnabled && showToast) {
+                        const deletedMessage = deletedIds.length === 1
+                            ? translate('list.taskDeleted', 'Task deleted')
+                            : translate('list.tasksDeleted', '{{count}} tasks deleted')
+                                .replace('{{count}}', String(deletedIds.length));
+                        showToast(deletedMessage, 'info', 5000, {
+                            label: translate('common.undo', 'Undo'),
+                            onClick: undo,
+                        });
+                    }
+                }
+                options?.afterSuccess?.();
+            },
+        });
+    }, [
+        batchDeleteTasks,
+        restoreTask,
+        runSelectedTaskAction,
+        selectedIdsArray,
+        showToast,
+        translate,
+        undoNotificationsEnabled,
+    ]);
+
+    const updateSelectedTasks = useCallback((
+        updates: TaskUpdate[] | ((taskIds: string[]) => TaskUpdate[]),
+        options?: Omit<RunActionOptions, 'confirm'>,
+    ) => {
+        if (!batchUpdateTasks) return Promise.resolve(false);
+        return runSelectedTaskAction(
+            'update',
+            (taskIds) => {
+                const changes = typeof updates === 'function' ? updates(taskIds) : updates;
+                const completedIds = changes.filter((change) => change.updates.status === 'done').map((change) => change.id);
+                return completedIds.length > 0
+                    ? trackInboxCompletion(completedIds, () => batchUpdateTasks(changes))
+                    : batchUpdateTasks(changes);
+            },
+            options,
+        );
+    }, [batchUpdateTasks, runSelectedTaskAction, trackInboxCompletion]);
+
+    const moveSelectedTasksToDestination = useCallback((destination: TaskMoveDestination) => {
+        if (!tasksById) return Promise.resolve(false);
+        return updateSelectedTasks((taskIds) => taskIds.flatMap((id) => {
+            const task = tasksById instanceof Map ? tasksById.get(id) : tasksById[id];
+            return task ? [{ id, updates: buildTaskMovePatch(destination, task) }] : [];
+        }));
+    }, [tasksById, updateSelectedTasks]);
+
+    const assignAreaToSelectedTasks = useCallback((areaId: string | null) => (
+        updateSelectedTasks((taskIds) => taskIds.map((id) => ({
+            id,
+            updates: { areaId: areaId ?? undefined },
+        })))
+    ), [updateSelectedTasks]);
+
+    const assignEnergyToSelectedTasks = useCallback((energyLevel: TaskEnergyLevel) => (
+        updateSelectedTasks((taskIds) => taskIds.map((id) => ({
+            id,
+            updates: { energyLevel },
+        })))
+    ), [updateSelectedTasks]);
+
+    const organizeSelectedTasks = useCallback((
+        input: BulkOrganizeTaskUpdateInput,
+        options?: Omit<RunActionOptions, 'confirm'>,
+    ) => {
+        if (!tasksById || !batchUpdateTasks || selectedIdsArray.length === 0) {
+            return Promise.resolve(false);
+        }
+        const updates = buildBulkOrganizeTaskUpdates(selectedIdsArray, tasksById, input);
+        if (updates.length === 0) return Promise.resolve(false);
+
+        return runSelectedTaskAction(
+            'organize',
+            (taskIds) => {
+                const write = () => runStoreCommand(async () => {
+                    const state = useTaskStore.getState();
+                    if (organizeScope && !isBulkOrganizeSelectionCurrent(taskIds,
+                        (id) => tasksById instanceof Map ? tasksById.get(id) : tasksById[id], organizeScope, state)) {
+                        logStaleWriteRefused('bulk-organize');
+                        throw new Error('STALE_REVISION');
+                    }
+                    const estimateDisabled = input.timeEstimate !== undefined && !resolveFeatureFlags(state.settings).timeEstimates;
+                    return batchUpdateTasksFromLatest(taskIds, (task) => {
+                        const latest = buildBulkOrganizeTaskUpdate(task, estimateDisabled ? { ...input, timeEstimate: undefined } : input);
+                        return Object.keys(latest).length > 0 ? latest : null;
+                    });
+                });
+                return input.status === 'done' ? trackInboxCompletion(taskIds, write) : write();
+            },
+            options,
+        );
+    }, [batchUpdateTasks, organizeScope, runSelectedTaskAction, selectedIdsArray, tasksById, trackInboxCompletion]);
+
+    const updateSelectedTaskTokens = useCallback((
+        field: 'tags' | 'contexts',
+        value: string | readonly string[],
+        action: 'add' | 'remove',
+        options?: TokenActionOptions,
+    ) => {
+        if (!tasksById || selectedIdsArray.length === 0) return Promise.resolve(false);
+        const updates = buildBulkTaskTokenUpdates(
+            selectedIdsArray,
+            tasksById,
+            field,
+            value,
+            action,
+        );
+        if (updates.length === 0) {
+            options?.afterNoop?.();
+            return Promise.resolve(false);
+        }
+        if (!batchUpdateTasks) return Promise.resolve(false);
+
+        return runSelectedTaskAction(
+            'update',
+            (taskIds) => batchUpdateTasksFromLatest(taskIds, (task) => (
+                buildBulkTaskTokenUpdates([task.id], new Map([[task.id, task]]), field, value, action)[0]?.updates ?? null
+            )),
+            options,
+        );
+    }, [batchUpdateTasks, runSelectedTaskAction, selectedIdsArray, tasksById]);
+
+    return {
+        activeAction,
+        allVisibleTasksSelected,
+        assignAreaToSelectedTasks,
+        assignEnergyToSelectedTasks,
+        clearTaskSelection,
+        deleteSelectedTasks,
+        exitSelectionMode,
+        exportSelectedTasks,
+        isExporting,
+        multiSelectedIds,
+        moveSelectedTasks,
+        moveSelectedTasksToDestination,
+        organizeSelectedTasks,
+        runSelectedTaskAction,
+        selectedIdsArray,
+        selectionMode,
+        selectAllVisibleTasks,
+        setSelectionMode,
+        toggleMultiSelect,
+        toggleSelectionMode,
+        updateSelectedTasks,
+        updateSelectedTaskTokens,
+    };
+}

@@ -1,0 +1,940 @@
+import SwiftUI
+
+struct ReviewScreen: View {
+    let model: CoreModel
+    let palette: AppPalette
+    @Environment(\.scenePhase) private var scenePhase
+    private var view: CoreObject { model.reviewOverview }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if model.statusListSelectionMode { StatusListBulkBar(model: model, palette: palette, idPrefix: "review") }
+            overview
+        }
+        .onChange(of: scenePhase) { model.statusListSelectionOwnerChanged(active: $0 == .active) }
+        .onDisappear { model.statusListSelectionOwnerChanged(active: false) }
+    }
+
+    private var overview: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                toolbar
+                .padding(.horizontal, 16).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading).background(palette.card)
+                .overlay(alignment: .bottom) { palette.border.frame(height: 1) }
+                Group {
+                    ReviewFailure(model: model, palette: palette)
+                    if let notice = model.reviewNotice {
+                        Text(notice).rnFont(14).foregroundStyle(palette.success)
+                            .accessibilityIdentifier("review-row-notice")
+                    }
+                    if !view.text("empty").isEmpty {
+                        Text(view.text("empty")).rnFont(16).foregroundStyle(palette.secondary).multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity).padding(32).accessibilityIdentifier("review-empty")
+                    }
+                    let items = view.objects("items")
+                    ForEach(items.indices, id: \.self) { index in
+                        let item = items[index]
+                        if item.text("type") == "task" {
+                            let row = item.object("row")
+                            let selecting = model.statusListSelectionMode
+                            let selectable = model.statusListTaskSelectable(row)
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 8) {
+                                    if selecting && selectable { StatusListSelectButton(model: model, row: row, palette: palette, idPrefix: "review") }
+                                    TaskCard(row: row, model: model, palette: palette,
+                                        readOnly: selecting || row.flag("readOnly"), hideStatusBadge: selecting,
+                                        onProject: { project in Task { await model.openProject(project) } },
+                                        onSelection: selecting && selectable ? { row in Task { await model.selectStatusListTask(row) } } : nil,
+                                        onSelectionStart: selectable ? { row in Task { await model.selectStatusListTask(row) } } : nil)
+                                }
+                                AppChipFlow {
+                                    ForEach(["markReviewed", "advance"], id: \.self) { name in
+                                        let action = item.object("review").object(name)
+                                        if !action.isEmpty {
+                                            ReviewAction(title: action.text("label"), enabled: { model.reviewActionsShown },
+                                                palette: palette, id: "review-task-" + name + "-" + item.object("row").text("id")) {
+                                                Task { await model.performReviewTaskAction(action.object("action")) }
+                                            }
+                                            .accessibilityLabel(action.text("accessibilityLabel"))
+                                        }
+                                    }
+                                }
+                            }
+                            .modifier(ModelDisabled { !model.reviewActionsShown }).padding(.leading, 20)
+                        } else if item.text("type") == "later" {
+                            ReviewAction(title: item.text("label"), selected: item.flag("expanded"), enabled: { model.reviewActionsShown },
+                                palette: palette, id: "review-later-" + item.text("id")) {
+                                Task { await model.toggleReviewLater(item.text("id"), weekly: false) }
+                            }
+                            .accessibilityValue(model.label(item.flag("expanded") ? "markdown.collapse" : "markdown.expand"))
+                        } else { group(item) }
+                    }
+                    if items.count < view.number("total") {
+                        ReviewAction(title: model.label("common.more"), enabled: { model.reviewActionsShown }, palette: palette, id: "review-more") {
+                            Task { await model.loadMoreReview() }
+                        }
+                    }
+                    ModelShown { model.busyShown } content: { ProgressView().frame(maxWidth: .infinity).padding(12) }
+                }
+                .padding(.horizontal, 12).padding(.bottom, 10)
+            }
+        }
+        .accessibilityIdentifier("review-scroll")
+        .refreshable { await model.pullToRefresh() }
+    }
+
+    private var toolbar: some View {
+        let expansion = ReviewExpansionButton(expansion: view.object("expansion"), enabled: { model.reviewActionsShown }, palette: palette) {
+            Task { await model.editReviewOverview(expansion: ["type": "cycle"]) }
+        }
+        let chip = ReviewScopeChip(scope: view.object("scope"), enabled: { model.reviewActionsShown }, palette: palette) { model.openReviewPicker(.scope) }
+        let start = ReviewAction(title: view.object("startReview").text("label"), selected: true,
+            enabled: { model.reviewActionsShown }, palette: palette, id: "review-start") { model.openReviewPicker() }
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) { expansion; chip; Spacer(minLength: 0); start }
+            VStack(alignment: .leading, spacing: 8) { HStack(spacing: 8) { expansion; chip }; start }
+            AppChipFlow { expansion; chip; start }
+        }
+    }
+
+    private func group(_ item: CoreObject) -> some View {
+        let area = item.text("type") == "area"
+        return Button {
+            Task { await model.editReviewOverview(expansion: ["type": area ? "toggleArea" : "toggleProject", "id": item.text("id")]) }
+        } label: {
+            HStack(spacing: 10) {
+                if area { Circle().fill(item.text("color").isEmpty ? palette.tint : Color(hex: item.text("color"))).frame(width: 9, height: 9) }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(item.text("title")).rnFont(area ? 16 : 15, .bold)
+                    HStack(spacing: 5) {
+                        if !item.text("statusTone").isEmpty {
+                            Circle().fill(item.text("statusTone") == "warning" ? palette.warning : item.text("statusTone") == "danger" ? palette.danger : palette.success).frame(width: 6, height: 6)
+                        }
+                        Text(item.text("summary")).rnFont(12)
+                            .foregroundStyle(item.text("summaryTone") == "warning" ? palette.warning : palette.secondary)
+                    }
+                }
+                .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: item.flag("expanded") ? "chevron.down" : "chevron.right").foregroundStyle(palette.secondary)
+            }
+            .padding(14).frame(minHeight: 44).background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.border, lineWidth: 1)).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).modifier(ModelDisabled { !model.reviewActionsShown }).padding(.leading, area ? 0 : 12)
+        .accessibilityLabel(item.text("accessibilityLabel"))
+        .accessibilityValue(model.label(item.flag("expanded") ? "markdown.collapse" : "markdown.expand"))
+        .accessibilityAddTraits(item.flag("expanded") ? .isSelected : [])
+        .accessibilityIdentifier("review-" + item.text("type") + "-" + item.text("id"))
+    }
+}
+
+struct ReviewStartPicker: View {
+    let model: CoreModel
+    let palette: AppPalette
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.35).ignoresSafeArea().onTapGesture { model.closeReviewPicker() }.accessibilityHidden(true)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(model.reviewOverview.object("startReview").text("label")).rnFont(20, .bold).accessibilityAddTraits(.isHeader)
+                        let choices = model.reviewOverview.object("startReview").objects("options")
+                        ForEach(choices.indices, id: \.self) { index in
+                            let choice = choices[index]
+                            ReviewAction(title: choice.text("label"), enabled: { !model.busy && !model.retryNeeded },
+                                palette: palette, id: "review-start-" + choice.text("id")) {
+                                Task { await model.openReviewGuide(choice.text("id")) }
+                            }
+                        }
+                        ReviewAction(title: model.reviewOverview.object("startReview").text("cancelLabel"),
+                            enabled: { !model.busy && !model.retryNeeded }, palette: palette, id: "review-start-cancel") { model.closeReviewPicker() }
+                    }
+                    .padding(20)
+                }
+                .frame(maxWidth: 440, maxHeight: geometry.size.height * 0.7)
+                .background(palette.card, in: RoundedRectangle(cornerRadius: 16)).padding(20)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityElement(children: .contain).accessibilityAddTraits(.isModal)
+            .accessibilityAction(.escape) { model.closeReviewPicker() }
+        }
+    }
+}
+
+struct ReviewScopePicker: View {
+    let model: CoreModel
+    let palette: AppPalette
+
+    var body: some View {
+        let scope = model.reviewOverview.object("scope")
+        let choices = scope.objects("options")
+        let enabled = !model.busy && !model.retryNeeded
+        let options = VStack(alignment: .leading, spacing: 12) {
+            ForEach(choices.indices, id: \.self) { index in
+                let id = choices[index].text("id"), selected = scope.text("selected") == id
+                ReviewScopeOption(title: choices[index].text("label"),
+                    help: model.label(id == "due" ? "review.dueHelp" : "review.overviewHelp"),
+                    selected: selected, palette: palette, id: "review-scope-" + id) {
+                    Task { await model.chooseReviewScope(id) }
+                }
+            }
+            ReviewScopeOption(title: model.label("nav.done"), help: "", selected: false, palette: palette, id: "review-scope-done") {
+                Task { await model.openReviewDoneTasks() }
+            }
+            .accessibilityLabel(model.label("nav.done") + " " + model.label("common.tasks"))
+            HStack {
+                Spacer()
+                Button(model.reviewOverview.object("startReview").text("cancelLabel")) { model.closeReviewPicker() }
+                    .rnFont(16, .semibold).foregroundStyle(palette.secondary).frame(minWidth: 44, minHeight: 44)
+                    .accessibilityIdentifier("review-scope-cancel")
+            }
+        }
+        .padding(20).disabled(!enabled)
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.35).ignoresSafeArea().onTapGesture { model.closeReviewPicker() }.accessibilityHidden(true)
+                ViewThatFits(in: .vertical) {
+                    options
+                    ScrollView { options }
+                }
+                .background(palette.card, in: RoundedRectangle(cornerRadius: 16))
+                .frame(maxWidth: 440, maxHeight: geometry.size.height * 0.7).padding(20)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityElement(children: .contain).accessibilityAddTraits(.isModal)
+            .accessibilityAction(.escape) { model.closeReviewPicker() }
+        }
+    }
+}
+
+private struct ReviewScopeOption: View {
+    let title: String
+    let help: String
+    let selected: Bool
+    let palette: AppPalette
+    let id: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).rnFont(15, .bold).foregroundStyle(palette.text)
+                    if !help.isEmpty { Text(help).rnFont(12).foregroundStyle(palette.secondary) }
+                }
+                .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+                if selected { Image(systemName: "checkmark").foregroundStyle(palette.tint).accessibilityHidden(true) }
+                if help.isEmpty { AppIcon(name: "chevron", size: 18).rotationEffect(.degrees(-90)).foregroundStyle(palette.secondary) }
+            }
+            .multilineTextAlignment(.leading).padding(12).frame(minHeight: 48)
+            .background(palette.filter, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? palette.tint : palette.border, lineWidth: 1)).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).accessibilityIdentifier(id).accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+struct ReviewGuideScreen: View {
+    @Bindable var model: CoreModel
+    let palette: AppPalette
+    private var view: CoreObject { model.reviewGuide }
+    private var content: CoreObject { view.object("content") }
+    private var labels: CoreObject { view.object("labels") }
+    private var daily: Bool { model.reviewKind == "daily" }
+    private var someday: Bool { !daily && content.text("step") == "someday" }
+    private var scheduledGroup: Bool {
+        !daily && content.text("step") == "waiting" && content.object("scheduled").number("count") > 0
+    }
+    private var scheduledExpanded: Bool { model.reviewExpandedScheduled.contains(content.text("step")) }
+    private var title: String {
+        let value = daily ? view.text("title") : labels.text("weeklyReview")
+        return value.isEmpty ? model.reviewOverview.object("startReview").objects("options")
+            .first(where: { $0.text("id") == model.reviewKind })?.text("label") ?? "" : value
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 8) {
+                Button { Task { await model.closeReviewGuide() } } label: {
+                    AppIcon(name: "x", size: 22).frame(width: 44, height: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(model.busy || model.retryNeeded)
+                .accessibilityLabel(model.label("common.close")).accessibilityIdentifier("review-guide-close")
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).rnFont(12, .semibold).foregroundStyle(palette.secondary)
+                    Text(view.object("step").text("title")).rnFont(18, .bold).accessibilityAddTraits(.isHeader)
+                        .accessibilityIdentifier("review-guide-step")
+                    Text(view.object("step").text(daily ? "label" : "indicator")).rnFont(12).foregroundStyle(palette.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(12).background(palette.card)
+            HStack {
+                Button { Task { await model.openAreaPicker() } } label: {
+                    Text(model.area.text("label")).rnFont(13, .semibold).padding(.horizontal, 12)
+                        .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!model.reviewActionsEnabled)
+                .accessibilityLabel(model.label("projects.areaFilter")).accessibilityIdentifier("review-guide-area")
+                Spacer()
+                Button { model.openSearch() } label: {
+                    AppIcon(name: "search", size: 22).frame(width: 44, height: 44).contentShape(Rectangle())
+                }
+                    .buttonStyle(.plain).disabled(!model.reviewActionsEnabled)
+                    .accessibilityLabel(model.label("search.title")).accessibilityIdentifier("review-guide-search")
+            }
+            if !daily && !view.isEmpty {
+                ProgressView(value: (view.object("step")["progress"] as? Double ?? 0) / 100).tint(palette.tint)
+                ScrollView(.horizontal) {
+                    HStack(spacing: 12) {
+                        let steps = view.objects("rail")
+                        ForEach(steps.indices, id: \.self) { index in
+                            let step = steps[index]
+                            Text(String(step.number("number")) + " " + step.text("title")).rnFont(12, .semibold)
+                                .foregroundStyle(step.text("state") == "current" ? palette.tint : palette.secondary)
+                                .padding(.vertical, 8).accessibilityAddTraits(step.text("state") == "current" ? .isSelected : [])
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                }
+            }
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ReviewFailure(model: model, palette: palette)
+                    instructions
+                    if content.text("step") == "inbox" {
+                        inboxProcess
+                        if !daily { inboxMindSweep }
+                    }
+                    if !content.text("empty").isEmpty { empty(content.text("empty")) }
+                    if !daily && content.text("step") == "stale" {
+                        staleProjects
+                        if content.object("ai").flag("enabled") { aiInsights }
+                    }
+                    if !daily && content.text("step") == "calendar" { calendarTasks }
+                    let items = view.objects("items")
+                    let visibleItems = scheduledGroup ? items.filter { !$0.flag("scheduled") } : items
+                    if someday {
+                        somedayItems(visibleItems)
+                    } else if content.text("step") != "completed" {
+                        ForEach(visibleItems.indices, id: \.self) { index in
+                            guideItem(visibleItems[index])
+                            openProjectLink(after: index, in: visibleItems)
+                        }
+                    }
+                    if scheduledGroup {
+                        scheduledToggle
+                        if scheduledExpanded {
+                            let scheduledItems = items.filter { $0.flag("scheduled") }
+                            ForEach(scheduledItems.indices, id: \.self) { index in guideItem(scheduledItems[index]) }
+                        }
+                    }
+
+                    if content.text("step") == "completed" {
+                        completed
+                        if !daily { recap(items) }
+                    }
+                    let visibleTotal = view.number("total") - (scheduledGroup && !scheduledExpanded ? content.object("scheduled").number("count") : 0)
+                    if items.count < visibleTotal {
+                        ReviewAction(title: model.label("common.more"), enabled: { model.reviewActionsEnabled }, palette: palette, id: "review-guide-more") {
+                            Task { await model.loadMoreReview() }
+                        }
+                    }
+                    if !daily && content.text("step") == "completed" { completedMindSweepNudge }
+                    if model.busy { ProgressView().frame(maxWidth: .infinity).padding(12) }
+                }
+                .padding(16)
+            }
+            .accessibilityIdentifier("review-guide-content-" + content.text("step"))
+            .refreshable { await model.pullToRefresh() }
+            if !model.taskFocusNotice.isEmpty { TaskFocusNotice(model: model, palette: palette) }
+            if model.error != nil { FailureBanner(model: model, palette: palette) }
+            footer
+        }
+        .foregroundStyle(palette.text).background(palette.bg.ignoresSafeArea())
+        .accessibilityElement(children: .contain).accessibilityAddTraits(.isModal)
+        .accessibilityAction(.escape) { Task { await model.closeReviewGuide() } }
+        .accessibilityHidden(model.reviewProjectTaskPresented)
+        .overlay { if model.reviewProjectTaskPresented { projectTaskPrompt } }
+        .alert(model.reviewProjectCompletionOptions.text("title"), isPresented: Binding(
+            get: { !model.reviewProjectCompletionOptions.isEmpty },
+            set: { if !$0 { model.cancelWeeklyReviewProjectCompletion() } }
+        )) {
+            Button(model.label("common.cancel"), role: .cancel) { model.cancelWeeklyReviewProjectCompletion() }
+                .accessibilityIdentifier("review-project-complete-cancel")
+            Button(model.label("projects.complete")) { model.confirmWeeklyReviewProjectCompletion() }
+                .accessibilityIdentifier("review-project-complete-confirm")
+        } message: { Text(model.label("projects.completeConfirm")) }
+        .onDisappear { model.retireReviewAI() }
+    }
+
+    @ViewBuilder private var instructions: some View {
+        if daily {
+            Text(view.object("step").text("description")).rnFont(14).foregroundStyle(palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if content["count"] != nil {
+                Text(String(content.number("count")) + " " + content.text("unit")).rnFont(14, .semibold)
+            }
+        } else {
+            let step = content.text("step")
+            let heading = ["inbox": "inboxDesc", "stale": "stale", "calendar": "calendarUpcoming",
+                "waiting": "waitingDesc", "contexts": "contexts", "projects": "projectsDesc", "someday": "somedayDesc"][step] ?? ""
+            let hint = ["inbox": "inboxGuide", "stale": "staleDesc", "calendar": "calendarDesc",
+                "waiting": "waitingGuide", "contexts": "contextsDesc", "projects": "projectsGuide", "someday": "somedayGuide"][step] ?? ""
+            if !heading.isEmpty { Text(labels.text(heading)).rnFont(18, .bold).accessibilityAddTraits(.isHeader) }
+            if !hint.isEmpty { Text(labels.text(hint)).rnFont(14).foregroundStyle(palette.secondary).fixedSize(horizontal: false, vertical: true) }
+            if !content.text("countLabel").isEmpty {
+                Text(content.text("countLabel")).rnFont(14, .semibold)
+                    .accessibilityIdentifier("review-guide-count")
+            }
+        }
+    }
+
+    @ViewBuilder private var inboxProcess: some View {
+        let label = daily ? content.text("processLabel") : labels.text("processInbox")
+        let hasItems = daily ? content.number("count") > 0 : !content.text("countLabel").isEmpty
+        if hasItems && !label.isEmpty {
+            Button { Task { await model.openProcessInbox() } } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "play.fill").font(.system(size: 14)).accessibilityHidden(true)
+                    Text(label).rnFont(14, .semibold).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                }
+                .foregroundStyle(palette.onTint)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .padding(.horizontal, 14)
+                .background(palette.tint, in: RoundedRectangle(cornerRadius: 10))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).disabled(!model.reviewActionsEnabled)
+            .accessibilityLabel(label)
+            .accessibilityIdentifier(daily ? "review-daily-process-inbox" : "review-weekly-process-inbox")
+        }
+    }
+
+    private var inboxMindSweep: some View {
+        Button { Task { await model.openMindSweep() } } label: {
+            HStack(spacing: 10) {
+                AppIcon(name: "brain", size: 18)
+                Text(labels.text("mindSweep")).rnFont(14, .semibold)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right").font(.system(size: 14, weight: .semibold))
+                    .accessibilityHidden(true)
+            }
+            .foregroundStyle(palette.tint)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .padding(.horizontal, 14)
+            .background(palette.card, in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!model.reviewActionsEnabled)
+        .accessibilityLabel(labels.text("mindSweep"))
+        .accessibilityIdentifier("review-mind-sweep-button")
+    }
+
+    private var completedMindSweepNudge: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(labels.text("mindSweepTitle")).rnFont(16, .bold)
+                .accessibilityIdentifier("review-mind-sweep-nudge-title")
+            Text(labels.text("mindSweepIntro")).rnFont(14).foregroundStyle(palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button { Task { await model.openMindSweep() } } label: {
+                HStack(spacing: 8) {
+                    AppIcon(name: "brain", size: 16)
+                    Text(labels.text("mindSweep")).rnFont(14, .semibold)
+                }
+                .foregroundStyle(palette.tint)
+                .padding(.horizontal, 14).frame(minHeight: 44)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.tint, lineWidth: 1))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).disabled(!model.reviewActionsEnabled)
+            .accessibilityLabel(labels.text("mindSweep"))
+            .accessibilityIdentifier("review-mind-sweep-button")
+        }
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.border, lineWidth: 1))
+    }
+
+    private var scheduledToggle: some View {
+        Button { model.toggleReviewScheduled() } label: {
+            HStack(spacing: 8) {
+                Image(systemName: scheduledExpanded ? "chevron.down" : "chevron.right")
+                Text(content.object("scheduled").text("label")).rnFont(13, .semibold)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(palette.secondary).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!model.reviewActionsEnabled)
+        .accessibilityLabel(content.object("scheduled").text("label"))
+        .accessibilityValue(model.label(scheduledExpanded ? "markdown.collapse" : "markdown.expand"))
+        .accessibilityAddTraits(scheduledExpanded ? .isSelected : [])
+        .accessibilityIdentifier("review-scheduled-toggle-" + content.text("step"))
+    }
+
+    private func somedayItems(_ entries: [CoreObject]) -> some View {
+        let headers = entries.filter { $0.text("type") == "somedaySection" }
+        let groups = Dictionary(grouping: entries.filter { $0.text("type") != "somedaySection" }) { Data($0.text("sectionId").utf8) }
+        return ForEach(headers.indices, id: \.self) { index in
+            let header = headers[index]
+            let sectionID = header.text("sectionId")
+            let key = Data(sectionID.utf8)
+            let expanded = !model.reviewCollapsedSomedaySections.contains(key)
+            reviewDisclosure("\(header.text("title")) (\(header.number("count")))", expanded: expanded,
+                             id: "weekly-someday-section-" + sectionID) {
+                model.toggleReviewSomedaySection(sectionID)
+            }
+            if expanded {
+                let rows = groups[key] ?? []
+                somedayRows(rows.filter { !$0.flag("scheduled") })
+                if header.number("scheduledCount") > 0 {
+                    let scheduledExpanded = model.reviewExpandedSomedayScheduledSections.contains(key)
+                    reviewDisclosure(header.text("scheduledLabel"), expanded: scheduledExpanded,
+                                     id: "weekly-someday-scheduled-" + sectionID) {
+                        model.toggleReviewSomedaySection(sectionID, scheduled: true)
+                    }
+                    .padding(.leading, 12)
+                    if scheduledExpanded { somedayRows(rows.filter { $0.flag("scheduled") }) }
+                }
+            }
+        }
+    }
+
+    private func somedayRows(_ rows: [CoreObject]) -> some View {
+        ForEach(rows.indices, id: \.self) { index in
+            let row = rows[index]
+            if row.text("type") == "somedayProject" { somedayProject(row) }
+            else { guideItem(row) }
+        }
+    }
+
+    private func somedayProject(_ project: CoreObject) -> some View {
+        let id = project.text("id")
+        return SwipeActionCard(
+            palette: palette, enabled: model.reviewActionsEnabled, id: "weekly-someday-project-" + id,
+            leftLabel: labels.text("reactivate"), rightLabel: "", leftSystemImage: "arrow.uturn.backward",
+            open: { Task { await model.openProject(project) } },
+            swipe: { _ in Task { await model.activateDeferredProject(id) } },
+            content: HStack(spacing: 10) {
+                AppIcon(name: "folder", size: 18)
+                    .foregroundStyle(project.text("color").isEmpty ? palette.secondary : palette.einkSafe(Color(hex: project.text("color"))))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(project.text("title")).rnFont(14, .semibold)
+                    if !project.text("areaName").isEmpty {
+                        Text(project.text("areaName")).rnFont(12).foregroundStyle(palette.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 10).padding(.horizontal, 12).frame(minHeight: 44)
+            .background(palette.card, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.border, lineWidth: 1)).contentShape(Rectangle())
+        )
+    }
+
+    private func reviewDisclosure(_ title: String, expanded: Bool, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right").accessibilityHidden(true)
+                Text(title).rnFont(14, .semibold).fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!model.reviewActionsEnabled)
+        .accessibilityValue(model.label(expanded ? "markdown.collapse" : "markdown.expand"))
+        .accessibilityIdentifier(id)
+    }
+
+    @ViewBuilder private func recap(_ items: [CoreObject]) -> some View {
+        let week = content.object("week")
+        if !week.text("rangeLabel").isEmpty {
+            let grouping = model.reviewShownRecapGroup
+            reviewDisclosure(labels.text("details"), expanded: grouping != nil, id: "weekly-review-recap") {
+                Task { await model.setReviewRecapGroup(grouping == nil ? .project : nil) }
+            }
+            if let grouping {
+                Text(week.text("rangeLabel")).rnFont(14).foregroundStyle(palette.secondary)
+                    .accessibilityIdentifier("weekly-review-recap-range")
+                AppChipFlow {
+                    ForEach(CoreModel.ReviewRecapGroup.allCases, id: \.self) { group in
+                        ReviewAction(title: labels.text(group == .project ? "groupByProject" : "groupByArea"), selected: grouping == group,
+                                     enabled: { model.reviewActionsEnabled }, palette: palette, id: "weekly-review-recap-" + group.rawValue) {
+                            Task { await model.setReviewRecapGroup(group) }
+                        }
+                    }
+                }
+                ForEach(items.indices, id: \.self) { index in
+                    let entry = items[index]
+                    if entry.text("type") == "recapGroup" {
+                        Text("\(entry.text("title")) (\(entry.number("count")))").rnFont(14, .bold).accessibilityAddTraits(.isHeader)
+                    } else {
+                        Text(entry.text("title")).rnFont(14).padding(.leading, 12)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func guideItem(_ item: CoreObject) -> some View {
+        if !item.object("row").isEmpty {
+            TaskCard(row: item.object("row"), model: model, palette: palette,
+                footer: daily ? item.object("followUp").text("label") : "", hideStatusBadge: item.flag("hideStatusBadge"),
+                showFocusToggle: daily && content.text("step") == "focus", onProject: { project in Task { await model.openProject(project) } })
+                .disabled(!model.reviewActionsEnabled)
+        } else if item.text("type") == "later" {
+            ReviewAction(title: item.text("label"), selected: item.flag("expanded"), enabled: { model.reviewActionsEnabled },
+                palette: palette, id: "weekly-later-" + item.text("id")) {
+                Task { await model.toggleReviewLater(item.text("id"), weekly: true) }
+            }
+            .accessibilityValue(model.label(item.flag("expanded") ? "markdown.collapse" : "markdown.expand"))
+        } else if item.text("type") == "project" {
+            VStack(alignment: .leading, spacing: 8) {
+                Button { Task { await model.expandWeeklyReviewProject(item.text("id")) } } label: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Circle().fill(item.text("areaColor").isEmpty ? palette.tint : Color(hex: item.text("areaColor"))).frame(width: 8, height: 8)
+                            Text(item.text("title")).rnFont(16, .bold).frame(maxWidth: .infinity, alignment: .leading)
+                            Image(systemName: item.flag("expanded") ? "chevron.down" : "chevron.right")
+                        }
+                        Text(item.object("badge").text("label")).rnFont(12, .semibold)
+                            .foregroundStyle(Color(hex: item.object("badge").text("color")))
+                            .padding(6).background(Color(hex: item.object("badge").text("background")), in: Capsule())
+                        Text(item.text("countLabel")).rnFont(12).foregroundStyle(palette.secondary)
+                    }
+                    .fixedSize(horizontal: false, vertical: true).padding(14).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.border, lineWidth: 1)).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!model.reviewActionsEnabled)
+                .accessibilityAddTraits(item.flag("expanded") ? .isSelected : []).accessibilityIdentifier("review-guide-project-" + item.text("id"))
+                if !daily {
+                    ReviewAction(title: labels.text("addTask"), enabled: { model.reviewActionsEnabled },
+                        palette: palette, id: "review-project-add-task-" + item.text("id")) {
+                        Task { await model.openWeeklyReviewProjectTask(item.text("id")) }
+                    }
+                }
+                if item.flag("expanded"), content.text("step") == "projects" {
+                    ReviewAction(title: model.label("projects.complete"), enabled: { model.reviewActionsEnabled },
+                        palette: palette, id: "review-project-complete-" + item.text("id")) {
+                        Task { await model.requestWeeklyReviewProjectCompletion(item.text("id")) }
+                    }
+                    .accessibilityLabel(model.label("projects.complete") + " " + item.text("title"))
+                }
+            }
+        } else if item.text("type") == "context" {
+            VStack(alignment: .leading, spacing: 8) {
+                let context = item.text("context")
+                let window = model.reviewNestedWindow("contextTasks", key: context, fallback: item.object("tasks"))
+                let expanded = model.reviewExpandedContexts.contains(context)
+                HStack(alignment: .firstTextBaseline) {
+                    Text(context).rnFont(16, .bold).accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    Text(String(window.number("total"))).rnFont(13).foregroundStyle(palette.secondary)
+                        .accessibilityIdentifier("review-context-count-" + context)
+                }
+                let tasks = window.objects("items")
+                let visibleTasks = expanded ? tasks : Array(tasks.prefix(max(0, content.number("previewCount"))))
+                ForEach(visibleTasks.indices, id: \.self) { index in taskLink(visibleTasks[index].text("id"), title: visibleTasks[index].text("title")) }
+                if expanded && tasks.count < window.number("total") {
+                    ReviewAction(title: model.label("common.more"), enabled: { model.reviewActionsEnabled }, palette: palette,
+                        id: "review-context-more-" + item.text("context")) {
+                        Task { await model.loadMoreReviewNested("contextTasks", key: context) }
+                    }
+                }
+                if !item.text("moreLabel").isEmpty {
+                    ReviewAction(title: expanded ? labels.text("less") : item.text("moreLabel"), selected: expanded,
+                        enabled: { model.reviewActionsEnabled }, palette: palette, id: "review-context-toggle-" + context) {
+                        model.toggleReviewContext(context)
+                    }
+                }
+            }
+            .padding(14).background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.border, lineWidth: 1))
+        }
+    }
+
+    private var aiInsights: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(labels.text("ai")).rnFont(16, .bold).accessibilityAddTraits(.isHeader)
+            Text(labels.text("aiDesc")).rnFont(14).foregroundStyle(palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            AppChipFlow {
+                ReviewAction(title: labels.text(model.reviewAIWorking ? "aiRunning" : "aiRun"),
+                    enabled: { model.reviewAICanRequest }, palette: palette, id: "review-ai-run") { model.requestReviewAI() }
+                if model.reviewAIWorking {
+                    ProgressView().accessibilityLabel(labels.text("aiRunning")).accessibilityIdentifier("review-ai-working")
+                    ReviewAction(title: model.label("common.cancel"), enabled: { true },
+                        palette: palette, id: "review-ai-cancel") { model.cancelReviewAI() }
+                }
+            }
+            if let error = model.reviewAIError {
+                Text(error).rnFont(14).foregroundStyle(palette.danger).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("review-ai-error")
+            }
+            if model.reviewAIRan && !model.reviewAIWorking && model.reviewAISuggestions.isEmpty && model.reviewAIError == nil {
+                Text(labels.text("aiEmpty")).rnFont(14).foregroundStyle(palette.secondary)
+                    .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("review-ai-empty")
+            }
+            let suggestionRows = model.reviewAISuggestions
+            ForEach(suggestionRows.indices, id: \.self) { index in
+                let item = suggestionRows[index]
+                let selected = model.reviewAISelectedIDs.contains(item.text("id"))
+                let actionable = item.flag("actionable") && !item.text("id").hasPrefix("project:")
+                    && ["someday", "archive"].contains(item.text("action"))
+                let actionLabel = ["someday": "aiActionSomeday", "archive": "aiActionArchive",
+                    "breakdown": "aiActionBreakdown", "keep": "aiActionKeep"][item.text("action")] ?? "aiActionKeep"
+                Button { model.toggleReviewAISuggestion(item.text("id")) } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: selected ? "checkmark.square.fill" : "square")
+                            .foregroundStyle(actionable ? palette.tint : palette.secondary).accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(item.text("title")).rnFont(15, .semibold)
+                            if !item.text("meta").isEmpty { Text(item.text("meta")).rnFont(12).foregroundStyle(palette.secondary) }
+                            Text(labels.text(actionLabel)).rnFont(13, .semibold).foregroundStyle(palette.tint)
+                            if !item.text("reason").isEmpty { Text(item.text("reason")).rnFont(14).foregroundStyle(palette.secondary) }
+                        }
+                        .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(12).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .background(palette.filter, in: RoundedRectangle(cornerRadius: 10)).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!actionable || !model.reviewAICanSelect)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+                .accessibilityIdentifier("review-ai-suggestion-" + item.text("id"))
+            }
+            if !model.reviewAISuggestions.isEmpty {
+                ReviewAction(title: labels.text("aiApply") + " (" + String(model.reviewAISelectedIDs.count) + ")",
+                    selected: true, enabled: { model.reviewAICanApply }, palette: palette, id: "review-ai-apply") { model.applyReviewAISelection() }
+            }
+        }
+        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.border, lineWidth: 1))
+    }
+
+    @ViewBuilder private func openProjectLink(after index: Int, in items: [CoreObject]) -> some View {
+        let item = items[index]
+        let id = item.text("type") == "project" ? item.text("id") : item.text("projectId")
+        let next = index + 1 < items.count ? items[index + 1].text("projectId") : ""
+        if !daily, !id.isEmpty, next != id,
+           let card = items[...index].last(where: { $0.text("type") == "project" }), card.text("id") == id, card.flag("expanded") {
+            Button { Task { await model.openProject(card) } } label: {
+                Label(card.text("openLabel"), systemImage: "folder").rnFont(13, .semibold)
+                    .fixedSize(horizontal: false, vertical: true).frame(minHeight: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).foregroundStyle(palette.tint).disabled(!model.reviewActionsEnabled)
+            .accessibilityLabel(card.text("openLabel")).accessibilityIdentifier("review-guide-open-project-" + id)
+        }
+    }
+
+    private var projectTaskPrompt: some View {
+        let options = model.reviewProjectTaskOptions
+        return GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.3).ignoresSafeArea().accessibilityHidden(true)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(options.text("title")).rnFont(18, .bold).accessibilityAddTraits(.isHeader)
+                            .fixedSize(horizontal: false, vertical: true)
+                        TextField(options.text("placeholder"), text: $model.reviewProjectTaskText, axis: .vertical)
+                            .rnFont(16).padding(12).frame(minHeight: 48).background(palette.input, in: RoundedRectangle(cornerRadius: 8))
+                            .disabled(model.busy || model.retryNeeded).accessibilityIdentifier("review-project-task-title")
+                        if let error = model.reviewProjectTaskError {
+                            Text(error).rnFont(13).foregroundStyle(palette.danger).fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("review-project-task-error")
+                        }
+                        if model.retryNeeded {
+                            Button(model.label("common.retry")) { Task { await model.retryWeeklyReviewProjectTask() } }
+                                .frame(minHeight: 44).disabled(model.busy).accessibilityIdentifier("review-project-task-retry")
+                        } else {
+                            Button(options.text("save")) { Task { await model.submitWeeklyReviewProjectTask(openAfterSave: false) } }
+                                .frame(minHeight: 44).disabled(model.busy || model.reviewProjectTaskText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .accessibilityIdentifier("review-project-task-save")
+                            Button(options.text("saveAndEdit")) { Task { await model.submitWeeklyReviewProjectTask(openAfterSave: true) } }
+                                .frame(minHeight: 44).disabled(model.busy || model.reviewProjectTaskText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .accessibilityIdentifier("review-project-task-save-edit")
+                        }
+                        Button(options.text("cancel")) { model.cancelWeeklyReviewProjectTask() }
+                            .frame(minHeight: 44).disabled(!model.reviewProjectTaskCanCancel).accessibilityIdentifier("review-project-task-cancel")
+                        if model.busy { ProgressView().frame(maxWidth: .infinity) }
+                    }
+                    .padding(20)
+                }
+                .frame(maxWidth: 480, maxHeight: max(160, geometry.size.height - 48))
+                .background(palette.card, in: RoundedRectangle(cornerRadius: 16)).padding(24)
+                .accessibilityElement(children: .contain).accessibilityAddTraits(.isModal)
+                .accessibilityIdentifier("review-project-task-prompt")
+                .accessibilityAction(.escape) { model.cancelWeeklyReviewProjectTask() }
+            }
+        }
+    }
+
+    private var staleProjects: some View {
+        let window = model.reviewNestedWindow("staleProjects", fallback: content.object("projects"))
+        return VStack(alignment: .leading, spacing: 8) {
+            let projects = window.objects("items")
+            ForEach(projects.indices, id: \.self) { index in
+                let project = projects[index]
+                Button { Task { await model.openProject(project) } } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(project.text("title")).rnFont(15, .semibold)
+                        Text(project.text("daysLabel")).rnFont(12).foregroundStyle(palette.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(12).frame(minHeight: 44)
+                    .background(palette.card, in: RoundedRectangle(cornerRadius: 10)).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!model.reviewActionsEnabled).accessibilityIdentifier("review-stale-project-" + project.text("id"))
+            }
+            if projects.count < window.number("total") {
+                ReviewAction(title: model.label("common.more"), enabled: { model.reviewActionsEnabled }, palette: palette, id: "review-stale-more") {
+                    Task { await model.loadMoreReviewNested("staleProjects") }
+                }
+            }
+        }
+    }
+
+    private var calendarTasks: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(labels.text("calendarTasks")).rnFont(15, .bold)
+            let tasks = content.objects("tasks")
+            ForEach(tasks.indices, id: \.self) { index in
+                VStack(alignment: .leading, spacing: 4) {
+                    taskLink(tasks[index].text("taskId"), title: tasks[index].text("title"))
+                    Text(tasks[index].text("meta")).rnFont(12).foregroundStyle(palette.secondary)
+                }
+            }
+            if !content.text("tasksEmpty").isEmpty { empty(content.text("tasksEmpty")) }
+        }
+    }
+
+    private func taskLink(_ id: String, title: String) -> some View {
+        Button { Task { await model.openTask(id) } } label: {
+            Text(title).rnFont(15).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!model.reviewActionsEnabled).accessibilityIdentifier("review-guide-task-" + id)
+    }
+
+    private func empty(_ text: String) -> some View {
+        Text(text).rnFont(14).foregroundStyle(palette.secondary).fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 20)
+    }
+
+    private var completed: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Image(systemName: "checkmark.circle").font(.system(size: 48)).foregroundStyle(palette.tint).accessibilityHidden(true)
+            if daily {
+                Text(model.label("dailyReview.completeDesc")).rnFont(14).foregroundStyle(palette.secondary)
+            } else {
+                Text(labels.text("reviewComplete")).rnFont(22, .bold)
+                Text(labels.text("completeDesc")).rnFont(14).foregroundStyle(palette.secondary)
+                let week = content.object("week")
+                if !week.isEmpty {
+                    Text(week.text("heading")).rnFont(16, .bold)
+                    ForEach(week["rows"] as? [String] ?? [], id: \.self) { Text($0).rnFont(14) }
+                }
+                let checks = content.objects("checks")
+                ForEach(checks.indices, id: \.self) { index in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: checks[index].flag("good") ? "checkmark.circle" : "circle").foregroundStyle(palette.secondary)
+                        Text(checks[index].text("text")).rnFont(14)
+                    }
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading).padding(16)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var footer: some View {
+        AppChipFlow {
+            if !view.object("finish").isEmpty {
+                ReviewAction(title: view.object("finish").text("label"), selected: true, enabled: { model.reviewActionsEnabled },
+                    palette: palette, id: "review-guide-finish") { Task { await model.finishReview() } }
+            } else {
+                ReviewAction(title: view.object("back").text("label"), enabled: { model.reviewActionsEnabled && (view.object("back")["checkpoint"] is String) },
+                    palette: palette, id: "review-guide-back") { Task { await model.moveReview("back") } }
+                ReviewAction(title: view.object("next").text("label"), selected: true, enabled: { model.reviewActionsEnabled && !view.object("next").isEmpty },
+                    palette: palette, id: "review-guide-next") { Task { await model.moveReview("next") } }
+            }
+        }
+        .padding(14).frame(maxWidth: .infinity, alignment: .trailing).background(palette.card)
+        .overlay(alignment: .top) { palette.border.frame(height: 1) }
+    }
+}
+
+private struct ReviewAction: View {
+    let title: String
+    var selected = false
+    let enabled: () -> Bool
+    let palette: AppPalette
+    let id: String
+    let action: () -> Void
+    var body: some View {
+        let isEnabled = enabled()
+        Button(action: action) {
+            Text(title).rnFont(14, .semibold).fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(selected ? palette.onTint : palette.text)
+                .padding(.horizontal, 14).padding(.vertical, 10).frame(minWidth: 44, minHeight: 44)
+                .background(selected ? palette.tint : palette.filter, in: RoundedRectangle(cornerRadius: 10)).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!isEnabled).opacity(isEnabled ? 1 : 0.5)
+        .accessibilityIdentifier(id).accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+private struct ReviewExpansionButton: View {
+    let expansion: CoreObject
+    let enabled: () -> Bool
+    let palette: AppPalette
+    let action: () -> Void
+    var body: some View {
+        let isEnabled = enabled() && !expansion.flag("disabled")
+        Button(action: action) {
+            AppIcon(name: "chevrons-down", size: 20).rotationEffect(.degrees(expansion.flag("allExpanded") ? 180 : 0))
+                .foregroundStyle(palette.secondary).frame(width: 44, height: 44)
+                .background(palette.filter, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.border, lineWidth: 1)).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!isEnabled).opacity(isEnabled ? 1 : 0.45)
+        .accessibilityLabel(expansion.text("label")).accessibilityIdentifier("review-expand-cycle")
+    }
+}
+
+private struct ReviewScopeChip: View {
+    let scope: CoreObject
+    let enabled: () -> Bool
+    let palette: AppPalette
+    let action: () -> Void
+    var body: some View {
+        let isEnabled = enabled()
+        let label = scope.objects("options").first(where: { $0.text("id") == scope.text("selected") })?.text("label") ?? ""
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(label).rnFont(14, .semibold).foregroundStyle(palette.text).fixedSize(horizontal: false, vertical: true)
+                AppIcon(name: "chevron", size: 16).foregroundStyle(palette.secondary)
+            }
+            .padding(.horizontal, 10).frame(minHeight: 44)
+            .background(palette.filter, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.border, lineWidth: 1)).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!isEnabled).opacity(isEnabled ? 1 : 0.5)
+        .accessibilityLabel(label).accessibilityHint(scope.text("help")).accessibilityIdentifier("review-scope")
+    }
+}
+
+private struct ReviewFailure: View {
+    let model: CoreModel
+    let palette: AppPalette
+    var body: some View {
+        if let error = model.reviewError {
+            Text(error).rnFont(14).foregroundStyle(palette.danger).textSelection(.enabled).accessibilityIdentifier("review-error")
+            ReviewAction(title: model.label("common.retry"), enabled: { !model.busy && !model.retryNeeded }, palette: palette, id: "review-retry") {
+                Task { await model.retryReview() }
+            }
+        }
+    }
+}

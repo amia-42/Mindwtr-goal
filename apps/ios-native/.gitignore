@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+DerivedData/
+Resources/core-host.js
+Resources/label-keys.json
+Sources/MindwtrNativeCore/Resources/sandbox-host.js
+*.xcuserstate
+xcuserdata/
+__pycache__/

@@ -1,0 +1,124 @@
+name: "🔄 Sync / Data Issue"
+description: Report sync conflicts, missing data, duplicated tasks, or attachment sync problems
+title: "[SYNC] "
+labels: ["bug", "area:sync", "status:needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Please include diagnostics logs with your bug report.** Logs are especially important for sync, reminders, crashes, and problems we cannot reproduce. They help us identify what happened and avoid a round of follow-up questions.
+
+        In **Settings → Data → Diagnostics**, enable **Debug logging**, reproduce the problem if safe, then use **Share log** (mobile) or **Save log** (desktop). Attach the exported file below. If you cannot collect logs, explain why in the diagnostics field; you can still submit the report.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platforms involved
+      description: Every device that takes part in the sync.
+      multiple: true
+      options:
+        - "Desktop (Linux)"
+        - "Desktop (macOS)"
+        - "Desktop (Windows)"
+        - "Mobile (Android)"
+        - "Mobile (iOS)"
+        - "Cloud / WebDAV server"
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Sync backend
+      multiple: true
+      options:
+        - "WebDAV"
+        - "File Sync (a folder, e.g. Syncthing / Dropbox folder)"
+        - "Self-hosted cloud server"
+        - "Dropbox"
+        - "iCloud"
+        - "Other"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version(s)
+      description: One per device if they differ.
+      placeholder: desktop v1.3.1, Android v1.3.0
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Install channel(s)
+      multiple: true
+      options:
+        - "Play Store"
+        - "F-Droid"
+        - "App Store (iOS)"
+        - "TestFlight"
+        - "Mac App Store"
+        - "Microsoft Store"
+        - "winget"
+        - "Homebrew"
+        - "Flathub"
+        - "APT"
+        - "AUR"
+        - "Nix (community flake)"
+        - "Distro package"
+        - "Release file (.deb / .rpm / AppImage / .dmg / .exe / .msi / APK)"
+        - "Source / dev build"
+        - "Other"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS version(s)
+      description: All devices involved.
+    validations:
+      required: true
+  - type: dropdown
+    id: clocks
+    attributes:
+      label: Device clocks set automatically?
+      multiple: true
+      options:
+        - "Yes, on every device"
+        - "No, at least one device is set by hand"
+        - "Unknown"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Describe the mismatch, for example a description that disappeared, a duplicate task, a missing attachment.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics logs (strongly recommended)
+      description: |
+        Attach the log file by dragging it into this box. Include the approximate time of the problem and your timezone. For problems involving multiple devices, attach a log from each affected device and identify which is which.
+
+        Logs stay on your device until you share them and redact common credentials. Review files before posting: GitHub issues are public. Do not attach a full task database or backup. Instructions: https://docs.mindwtr.app/data-sync/diagnostics-logs
+
+        If logs are unavailable, explain why (for example, the app will not open). For a purely visual issue, a screenshot or recording plus a short explanation is fine.
+      placeholder: Attach logs here, or explain why you cannot provide them.
+    validations:
+      required: true

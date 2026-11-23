@@ -1,0 +1,67 @@
+diff --git a/apps/mobile/app.config.ts b/apps/mobile/app.config.ts
+index fe4bc67c1..b26b4ea23 100644
+--- a/apps/mobile/app.config.ts
++++ b/apps/mobile/app.config.ts
+@@ -1,4 +1,5 @@
+ import type { ConfigContext, ExpoConfig } from 'expo/config';
++import { withAndroidManifest } from 'expo/config-plugins';
+ import { readFileSync } from 'fs';
+ import { join } from 'path';
+ 
+@@ -33,6 +34,7 @@ const donationPromptEnabled = process.env.DONATION_PROMPT_ENABLED === '1'
+   || process.env.DONATION_PROMPT_ENABLED === 'true';
+ const promptTestControlsEnabled = process.env.PROMPT_TEST_CONTROLS_ENABLED === '1'
+   || process.env.PROMPT_TEST_CONTROLS_ENABLED === 'true';
++const isUpgradeTestVariant = (process.env.APP_VARIANT ?? '').trim() === 'upgradetest';
+ 
+ 
+ const isDevVariant = (process.env.APP_VARIANT ?? '').trim() === 'development';
+@@ -80,7 +82,35 @@ const withIosSceneLifecyclePlugin = (
+   return withoutScenePlugin;
+ };
+ 
++const withUpgradeTestManifest = (config: ExpoConfig): ExpoConfig => withAndroidManifest(config, (mod) => {
++  const application = mod.modResults.manifest.application?.[0];
++  if (!application) throw new Error('[app.config] upgradetest: no <application> in the manifest');
++  application.$['android:debuggable'] = 'true';
++  application.$['tools:ignore'] = 'HardcodedDebugMode';
++  for (const activity of application.activity ?? []) {
++    activity['intent-filter'] = (activity['intent-filter'] ?? []).filter((filter) => (
++      !(filter.data ?? []).some((data) => data.$?.['android:scheme'] === 'mindwtr')
++    ));
++  }
++  return mod;
++});
++
+ const withAppVariant = (base: ExpoConfig): ExpoConfig => {
++  if (isUpgradeTestVariant) {
++    return withUpgradeTestManifest({
++      ...base,
++      name: `${base.name} Upgrade Test`,
++      platforms: ['android' as const],
++      scheme: 'mindwtr-upgradetest',
++      android: { ...base.android, package: `${base.android?.package}.upgradetest` },
++      ios: { ...base.ios, infoPlist: { ...base.ios?.infoPlist, CFBundleURLTypes: [{ CFBundleURLSchemes: ['mindwtr-upgradetest'] }] } },
++      plugins: (base.plugins ?? []).map((entry) => {
++        if (!Array.isArray(entry) || entry[0] !== './plugins/android-widget') return entry;
++        const props = (entry[1] ?? {}) as { label?: string };
++        return [entry[0], { ...props, label: `${props.label ?? base.name} Upgrade Test` }] as typeof entry;
++      }),
++    });
++  }
+   if (!isDevVariant && !isBenchmarkVariant) return base;
+ 
+   const idSuffix = isBenchmarkVariant ? '.benchmark' : DEV_VARIANT_ID_SUFFIX;
+@@ -131,10 +161,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
+   const extra = {
+     ...(base.extra ?? {}),
+     isFossBuild,
+-    analyticsHeartbeatUrl: isBenchmarkVariant ? '' : analyticsHeartbeatUrl,
++    analyticsHeartbeatUrl: (isBenchmarkVariant || isUpgradeTestVariant) ? '' : analyticsHeartbeatUrl,
+     analyticsHeartbeatChannel,
+     analyticsReleaseVersion,
+-    feedbackEndpointUrl,
++    feedbackEndpointUrl: isUpgradeTestVariant ? '' : feedbackEndpointUrl,
+     dropboxAppKey,
+     donationPromptEnabled,
+     promptTestControlsEnabled,

@@ -1,0 +1,912 @@
+import SwiftUI
+import UIKit
+
+struct ProcessInboxSheet: View {
+    let model: CoreModel
+    let palette: AppPalette
+    @FocusState private var focusedField: String?
+    @State private var notesOpen = false
+    @State private var pickingField: String?
+    @State private var pickedDate = Date()
+    @State private var pickingTime = false
+
+    private var view: CoreObject { model.processInboxView }
+    private var enabled: Bool { model.processInboxControlsEnabled }
+    private var ui: ProcessInboxUI {
+        ProcessInboxUI(model: model, palette: palette, focus: $focusedField,
+                       pickDate: { row, time in presentDatePicker(row, time: time) })
+    }
+
+    var body: some View {
+        ZStack {
+            processingContent.accessibilityHidden(!model.processInboxAIAnswer.isEmpty)
+            if let ownerID = model.processInboxAIAnswerID, !model.processInboxAIAnswer.isEmpty {
+                ProcessInboxAIDialog(ui: ui, ownerID: ownerID)
+            }
+        }
+    }
+
+    private var processingContent: some View {
+        VStack(spacing: 0) {
+            ProcessInboxHeader(ui: ui)
+            if !model.processInboxUndoLabel.isEmpty { ProcessInboxUndo(ui: ui) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    if view.isEmpty { ProcessInboxCompleted(ui: ui) }
+                    else { ProcessInboxSteps(ui: ui, notesOpen: $notesOpen) }
+                    ProcessInboxMessages(ui: ui)
+                    if model.busy { ProgressView().frame(maxWidth: .infinity).padding(12) }
+                }
+                .frame(maxWidth: 640, alignment: .leading)
+                .frame(maxWidth: .infinity)
+                .padding(20)
+            }
+            .id(view.text("taskId"))
+            .scrollDismissesKeyboard(.interactively)
+            .accessibilityIdentifier("process-inbox-scroll")
+        }
+        .background(palette.bg.ignoresSafeArea())
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+        .accessibilityAction(.escape) { Task { await model.closeProcessInbox() } }
+        .onChange(of: view.text("taskId")) { _ in notesOpen = false; pickingField = nil }
+        .onChange(of: pickingField) { field in if field != nil { model.retireProcessInboxAI() } }
+        .onDisappear { model.retireProcessInboxAI() }
+        .sheet(isPresented: Binding(get: { pickingField != nil }, set: { if !$0 { pickingField = nil } })) {
+            datePickerSheet
+        }
+    }
+
+    private func presentDatePicker(_ row: CoreObject, time: Bool) {
+        guard enabled else { return }
+        let raw = row.text("date")
+        if raw.count >= 10 {
+            let day = String(raw.prefix(10))
+            let parts = day.split(separator: "-").compactMap { Int($0) }
+            if parts.count == 3 {
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = .current
+                pickedDate = calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2])) ?? Date()
+            }
+        } else { pickedDate = Date() }
+        pickingTime = time
+        let clock = row.object("time")
+        if time, let hour = clock["hour"] as? Int, let minute = clock["minute"] as? Int {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = .current
+            pickedDate = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: pickedDate) ?? pickedDate
+        }
+        pickingField = row.text("field")
+    }
+
+    private var datePickerSheet: some View {
+        VStack(spacing: 16) {
+            if pickingTime {
+                DatePicker("", selection: $pickedDate, displayedComponents: .hourAndMinute)
+                    .datePickerStyle(.wheel).labelsHidden()
+                    .accessibilityLabel(model.label("calendar.changeTime"))
+                    .accessibilityIdentifier("process-inbox-time-picker")
+            } else {
+                DatePicker("", selection: $pickedDate, displayedComponents: .date)
+                    .datePickerStyle(.graphical).labelsHidden()
+                    .accessibilityIdentifier("process-inbox-date-picker")
+            }
+            Button(model.label("common.done")) {
+                guard let field = pickingField else { return }
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = .current
+                let edit: CoreObject
+                if pickingTime {
+                    let parts = calendar.dateComponents([.hour, .minute], from: pickedDate)
+                    guard let hour = parts.hour, let minute = parts.minute else { return }
+                    edit = ["type": "setTime", "field": field, "value": String(format: "%02d:%02d", hour, minute)]
+                } else {
+                    let parts = calendar.dateComponents([.year, .month, .day], from: pickedDate)
+                    guard let year = parts.year, let month = parts.month, let day = parts.day else { return }
+                    edit = ["type": "setPickedDate", "field": field, "day": String(format: "%04d-%02d-%02d", year, month, day)]
+                }
+                pickingField = nil
+                Task { await model.editProcessInbox(edit) }
+            }
+            .rnFont(15, .semibold).frame(minHeight: 44).disabled(!enabled)
+            .accessibilityIdentifier(pickingTime ? "process-inbox-time-confirm" : "process-inbox-date-confirm")
+            Button(model.label("common.cancel"), role: .cancel) { pickingField = nil }
+                .rnFont(15).frame(minHeight: 44)
+                .accessibilityIdentifier(pickingTime ? "process-inbox-time-cancel" : "process-inbox-date-cancel")
+        }
+        .padding(20)
+        .presentationDetents([.medium, .large])
+    }
+}
+
+private struct ProcessInboxUI {
+    let model: CoreModel
+    let palette: AppPalette
+    let focus: FocusState<String?>.Binding
+    let pickDate: (CoreObject, Bool) -> Void
+}
+
+@MainActor private protocol ProcessInboxPart: View {
+    var ui: ProcessInboxUI { get }
+}
+
+private extension ProcessInboxPart {
+    var model: CoreModel { ui.model }
+    var palette: AppPalette { ui.palette }
+    var view: CoreObject { model.processInboxView }
+    var enabled: Bool { model.processInboxControlsEnabled }
+
+    func choiceSymbol(_ icon: String) -> String {
+        switch icon {
+        case "done": return "checkmark.circle"
+        case "project": return "folder"
+        case "later": return "clock"
+        case "delegate": return "person"
+        case "someday": return "arrow.up.circle"
+        case "incubate": return "calendar.badge.clock"
+        case "reference": return "book"
+        case "trash": return "trash"
+        default: return "chevron.right"
+        }
+    }
+
+    func textInput(_ field: String, label: String, multiline: Bool = false) -> some View {
+        TextField(label, text: Binding(
+            get: { model.processInboxInputs[field] ?? "" },
+            set: { model.setProcessInboxInput(field, $0) }), axis: multiline ? .vertical : .horizontal)
+            .rnFont(15)
+            .lineLimit(multiline ? 2...5 : 1...1)
+            .focused(ui.focus, equals: field)
+            .padding(12).frame(maxWidth: .infinity, minHeight: 44)
+            .background(palette.input, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(palette.border, lineWidth: 1))
+
+            .disabled(!enabled)
+            .contentShape(Rectangle())
+            .onTapGesture { if enabled { ui.focus.wrappedValue = field } }
+            .accessibilityLabel(label)
+    }
+
+    func options(_ values: [CoreObject], prefix: String, offset: Int = 0) -> some View {
+        AppChipFlow {
+            ForEach(values.indices, id: \.self) { index in
+                ProcessInboxOption(ui: ui, value: values[index], id: prefix + "-\(offset + index)")
+            }
+        }
+    }
+
+    func actionButton(_ title: String, id: String, requiresControls: Bool = true, active: Bool = true,
+                      action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).rnFont(14, .semibold).foregroundStyle(palette.tint)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 12).frame(minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled((requiresControls && !enabled) || !active)
+        .accessibilityIdentifier(id)
+    }
+
+    func primaryButton(_ title: String, id: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).rnFont(15, .semibold).foregroundStyle(palette.onTint)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .padding(.horizontal, 14)
+                .background(palette.tint, in: RoundedRectangle(cornerRadius: 10))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(id == "process-inbox-finish" ? !model.processInboxCloseEnabled : !enabled)
+        .accessibilityIdentifier(id)
+    }
+}
+
+private struct ProcessInboxHeader: ProcessInboxPart {
+    let ui: ProcessInboxUI
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(spacing: 8))
+        return layout {
+            Button { Task { await model.closeProcessInbox() } } label: {
+                Image(systemName: "xmark").font(.system(size: 18, weight: .semibold))
+                    .frame(width: 44, height: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).disabled(!model.processInboxCloseEnabled)
+            .accessibilityLabel(model.label("common.close"))
+            .accessibilityIdentifier("process-inbox-close")
+            VStack(alignment: .leading, spacing: 5) {
+                Text(view.object("progress").text("label")).rnFont(13, .semibold)
+                    .accessibilityIdentifier("process-inbox-progress")
+                let progress = view.object("progress")
+                ProgressView(value: Double(progress.number("processed")), total: Double(max(progress.number("total"), 1)))
+                    .tint(palette.tint)
+                    .accessibilityLabel(progress.text("label"))
+                    .accessibilityIdentifier("process-inbox-sheet")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if !view.isEmpty {
+                Button { Task { await model.openProcessInboxTaskEditor() } } label: {
+                    Image(systemName: "pencil").font(.system(size: 18, weight: .semibold))
+                        .frame(width: 44, height: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!enabled)
+                .accessibilityLabel(model.label("common.edit"))
+                .accessibilityIdentifier("process-inbox-edit")
+                Button { Task { await model.changeProcessInboxMode() } } label: {
+                    Text(view.text("modeToggleLabel")).rnFont(13, .semibold)
+                        .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!enabled)
+                .accessibilityIdentifier("process-inbox-mode")
+                Button { Task { await model.skipProcessInbox() } } label: {
+                    Text(view.text("skip")).rnFont(14, .semibold).foregroundStyle(palette.tint)
+                        .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!enabled)
+                .accessibilityIdentifier("process-inbox-skip")
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(palette.card)
+        .overlay(alignment: .bottom) { palette.border.frame(height: 0.5) }
+    }
+}
+
+private struct ProcessInboxUndo: ProcessInboxPart {
+    let ui: ProcessInboxUI
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(model.processInboxToast).rnFont(13).foregroundStyle(palette.success)
+            actionButton(model.processInboxUndoLabel, id: "process-inbox-undo",
+                         requiresControls: false, active: model.processInboxUndoEnabled) {
+                Task { await model.undoProcessInboxDecision() }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 20).padding(.vertical, 8)
+    }
+}
+
+private struct ProcessInboxSteps: ProcessInboxPart {
+    let ui: ProcessInboxUI
+    @Binding var notesOpen: Bool
+
+    var body: some View {
+        ProcessInboxCaptureCard(ui: ui, notesOpen: $notesOpen)
+        if !view.text("question").isEmpty {
+            Text(view.text("question")).rnFont(20, .bold)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityAddTraits(.isHeader)
+        }
+        if !view.text("hint").isEmpty {
+            Text(view.text("hint")).rnFont(14).foregroundStyle(palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        ProcessInboxChoices(ui: ui)
+        if !view.object("dateRow").isEmpty { ProcessInboxDateRow(ui: ui, row: view.object("dateRow")) }
+        if !view.object("delegate").isEmpty { ProcessInboxDelegateSection(ui: ui) }
+        if view.flag("projectFirst") { ProcessInboxProjectSection(ui: ui); contextsSection }
+        else { contextsSection; ProcessInboxProjectSection(ui: ui) }
+        if !view.object("somedaySections").isEmpty { ProcessInboxSomedaySection(ui: ui) }
+        if !view.object("moreOptions").isEmpty { ProcessInboxMoreOptions(ui: ui) }
+        ProcessInboxFooter(ui: ui)
+    }
+
+    @ViewBuilder private var contextsSection: some View {
+        let contexts = view.object("contexts")
+        if !contexts.isEmpty { ProcessInboxTokenSection(ui: ui, tokens: contexts, kind: "context") }
+    }
+}
+
+private struct ProcessInboxCaptureCard: ProcessInboxPart {
+    let ui: ProcessInboxUI
+    @Binding var notesOpen: Bool
+    private var capture: CoreObject { view.object("capture") }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !capture.text("returningLabel").isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: choiceSymbol("incubate")).font(.system(size: 13)).accessibilityHidden(true)
+                    Text(capture.text("returningLabel")).rnFont(12, .semibold)
+                        .accessibilityIdentifier("process-inbox-returning")
+                }
+                .foregroundStyle(palette.secondary)
+            }
+            textInput("title", label: capture.text("titleLabel"), multiline: true)
+                .accessibilityIdentifier("process-inbox-title")
+            if !capture.objects("similarTasks").isEmpty {
+                Text(capture.text("similarTasksLabel")).rnFont(12, .semibold).foregroundStyle(palette.secondary)
+                ForEach(Array(capture.objects("similarTasks").enumerated()), id: \.offset) { index, task in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(task.text("title")).rnFont(13)
+                        Text(task.text("meta")).rnFont(11).foregroundStyle(palette.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("process-inbox-similar-\(index)")
+                }
+            }
+            if !notesOpen && !capture.text("notePreview").isEmpty {
+                Text(capture.text("notePreview")).rnFont(13).foregroundStyle(palette.secondary)
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            }
+            Button { notesOpen.toggle() } label: {
+                HStack(spacing: 6) {
+                    Text(capture.text("descriptionLabel")).rnFont(14, .semibold)
+                    Image(systemName: notesOpen ? "chevron.up" : "chevron.down").font(.system(size: 12))
+                }
+                .foregroundStyle(palette.tint).frame(minHeight: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(notesOpen ? model.label("markdown.collapse") : model.label("markdown.expand"))
+            .accessibilityIdentifier("process-inbox-notes-toggle")
+            if !view.object("aiClarify").isEmpty {
+                if model.processInboxAIWorking {
+                    HStack(spacing: 10) {
+                        ProgressView().accessibilityHidden(true)
+                        Text(view.object("aiClarify").text("working")).rnFont(14)
+                            .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("process-inbox-ai-working")
+                        Spacer(minLength: 8)
+                        Button(model.label("common.cancel")) { model.retireProcessInboxAI() }
+                            .frame(minWidth: 44, minHeight: 44).accessibilityIdentifier("process-inbox-ai-cancel")
+                    }.foregroundStyle(palette.tint)
+                } else {
+                    Button {
+                        _ = UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                        model.requestProcessInboxAI()
+                    } label: {
+                        Label(view.object("aiClarify").text("label"), systemImage: "sparkles").rnFont(14, .semibold)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).foregroundStyle(palette.tint).disabled(!model.processInboxAICanRequest)
+                    .accessibilityIdentifier("process-inbox-ai-clarify")
+                }
+            }
+            if notesOpen {
+                textInput("description", label: capture.text("descriptionLabel"), multiline: true)
+                    .accessibilityIdentifier("process-inbox-notes")
+            }
+            if !capture.text("refineHint").isEmpty {
+                Text(capture.text("refineHint")).rnFont(12).foregroundStyle(palette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(palette.border, lineWidth: 1))
+    }
+}
+
+private struct ProcessInboxAIDialog: ProcessInboxPart {
+    let ui: ProcessInboxUI
+    let ownerID: UUID
+
+    var body: some View {
+        let answer = model.processInboxAIAnswer
+        let toast = answer.object("toast"), isToast = answer.text("kind") == "toast"
+        let choices = answer.objects("choices")
+        return GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(0.35).ignoresSafeArea().onTapGesture { model.dismissProcessInboxAIAnswer() }.accessibilityHidden(true)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(isToast ? toast.text("title") : answer.text("title")).rnFont(18, .bold)
+                            .fixedSize(horizontal: false, vertical: true).accessibilityAddTraits(.isHeader)
+                        if let message = (isToast ? toast["message"] : answer["message"]) as? String, !message.isEmpty {
+                            Text(message).rnFont(15).foregroundStyle(palette.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                        if isToast {
+                            Button(toast.object("action").text("label")) { model.openProcessInboxAISettings() }
+                                .rnFont(15, .semibold).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                .accessibilityIdentifier("process-inbox-ai-settings")
+                            Button(model.label("common.cancel")) { model.dismissProcessInboxAIAnswer() }
+                                .rnFont(15).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                .accessibilityIdentifier("process-inbox-ai-toast-dismiss")
+                        } else if answer.text("kind") == "alert" {
+                            Button(model.label("common.ok")) { model.dismissProcessInboxAIAnswer() }
+                                .rnFont(15, .semibold).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                .accessibilityIdentifier("process-inbox-ai-alert-dismiss")
+                        } else {
+                            ForEach(choices.indices, id: \.self) { index in
+                                Button { model.applyProcessInboxAIChoice(ownerID: ownerID, index: index) } label: {
+                                    Text(choices[index].text("label")).rnFont(15, choices[index].text("variant") == "primary" ? .semibold : .regular)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain).disabled(model.busy)
+                                .accessibilityIdentifier("process-inbox-ai-choice-\(index)")
+                            }
+                        }
+                    }.padding(20)
+                }
+                .frame(maxWidth: 520, maxHeight: max(160, geometry.size.height - 48))
+                .background(palette.card, in: RoundedRectangle(cornerRadius: 16))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(palette.border, lineWidth: 1))
+                .padding(24).foregroundStyle(palette.tint)
+                .accessibilityIdentifier("process-inbox-ai-dialog")
+                .accessibilityAddTraits(.isModal)
+                .accessibilityAction(.escape) { model.dismissProcessInboxAIAnswer() }
+            }
+        }
+    }
+}
+
+private struct ProcessInboxChoices: ProcessInboxPart {
+    let ui: ProcessInboxUI
+
+    var body: some View {
+        VStack(spacing: 0) {
+            let values = view.objects("choices")
+            let ordinary = values.filter { !$0.flag("danger") }
+            let destructive = values.filter { $0.flag("danger") }
+            VStack(spacing: 10) {
+                ForEach(ordinary.indices, id: \.self) { index in
+                    let choice = ordinary[index]
+                    Button { Task { await model.decideProcessInbox(choice.text("id")) } } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: choiceSymbol(choice.text("icon"))).frame(width: 22)
+                                .accessibilityHidden(true)
+                            Text(choice.text("label")).rnFont(15, .semibold)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundStyle(palette.text)
+                        .padding(.horizontal, 16).frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                        .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.border, lineWidth: 1))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).disabled(!enabled)
+                    .accessibilityIdentifier("process-inbox-choice-" + choice.text("id"))
+                }
+            }
+            ForEach(destructive.indices, id: \.self) { index in
+                let choice = destructive[index]
+                Button { Task { await model.decideProcessInbox(choice.text("id")) } } label: {
+                    HStack(spacing: 6) {
+                        Spacer(minLength: 0)
+                        Image(systemName: choiceSymbol(choice.text("icon"))).font(.system(size: 16))
+                            .accessibilityHidden(true)
+                        Text(choice.text("label")).rnFont(14, .semibold)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(palette.danger)
+                    .padding(.horizontal, 12).frame(maxWidth: .infinity, minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!enabled)
+                .padding(.top, 16)
+                .accessibilityIdentifier("process-inbox-choice-" + choice.text("id"))
+            }
+        }
+    }
+}
+
+private struct ProcessInboxDateRow: ProcessInboxPart {
+    let ui: ProcessInboxUI
+    let row: CoreObject
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(row.text("label")).rnFont(15, .semibold)
+            Button { ui.pickDate(row, false) } label: {
+                HStack {
+                    Image(systemName: "calendar").accessibilityHidden(true)
+                    Text(row.text("display")).rnFont(14)
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.system(size: 12)).accessibilityHidden(true)
+                }
+                .padding(.horizontal, 12).frame(minHeight: 44)
+                .background(palette.card, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(palette.border, lineWidth: 1))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).disabled(!enabled)
+            .accessibilityLabel(row.text("label") + ": " + row.text("display"))
+            .accessibilityIdentifier("process-inbox-date-" + row.text("field"))
+            AppChipFlow {
+                let time = row.object("time")
+                if !time.isEmpty {
+                    Button { ui.pickDate(row, true) } label: {
+                        Label(time.text("label"), systemImage: "clock").rnFont(13, .semibold)
+                            .padding(.horizontal, 12).frame(minHeight: 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).disabled(!enabled)
+                    .accessibilityLabel(row.text("label") + ": " + time.text("label"))
+                    .accessibilityIdentifier("process-inbox-time-" + row.text("field"))
+                }
+                let quick = row.objects("quickDates")
+                ForEach(quick.indices, id: \.self) { index in
+                    ProcessInboxOption(ui: ui, value: quick[index], id: "process-inbox-date-" + row.text("field") + "-preset-\(index)")
+                }
+                if !row.object("timeMode").isEmpty {
+                    ProcessInboxOption(ui: ui, value: row.object("timeMode"), id: "process-inbox-date-" + row.text("field") + "-time-mode")
+                }
+                if !row.object("clear").isEmpty {
+                    ProcessInboxOption(ui: ui, value: row.object("clear"), id: "process-inbox-date-" + row.text("field") + "-clear")
+                }
+            }
+        }
+        .sectionCard(palette)
+    }
+}
+
+private struct ProcessInboxProjectSection: ProcessInboxPart {
+    let ui: ProcessInboxUI
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        let project = view.object("project")
+        if !project.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(project.text("title")).rnFont(16, .bold).accessibilityAddTraits(.isHeader)
+                if !project.text("areaLabel").isEmpty {
+                    Text(project.text("areaLabel")).rnFont(13, .semibold).foregroundStyle(palette.secondary)
+                    if !project.text("inheritedArea").isEmpty {
+                        Text(project.text("inheritedArea")).rnFont(14)
+                    }
+                    options(project.objects("areas"), prefix: "process-inbox-area")
+                }
+                let conversion = project.object("conversion")
+                if !conversion.isEmpty {
+                    Text(conversion.text("nextActionLabel")).rnFont(14, .semibold)
+                    textInput("nextAction", label: conversion.text("nextActionLabel"))
+                        .submitLabel(.next).onSubmit {
+                            Task { await model.editProcessInbox([:], conversionAction: "nextSubmit") }
+                        }
+                        .accessibilityIdentifier("process-inbox-next-action")
+                    let rows = conversion.objects("rows")
+                    ForEach(rows.indices, id: \.self) { index in
+                        let rowLayout = dynamicTypeSize.isAccessibilitySize
+                            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                            : AnyLayout(HStackLayout(spacing: 8))
+                        rowLayout {
+                            textInput("extra-\(index)", label: conversion.text("nextActionLabel"))
+                                .submitLabel(.next).onSubmit {
+                                    Task { await model.editProcessInbox([:], conversionAction: "rowSubmit", index: index) }
+                                }
+                                .accessibilityIdentifier("process-inbox-extra-\(index)")
+                            Button { Task { await model.editProcessInbox(rows[index].object("remove"), conversionAction: "remove", index: index) } } label: {
+                                Image(systemName: "xmark").frame(width: 44, height: 44).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain).disabled(!enabled)
+                            .accessibilityLabel(conversion.text("removeActionLabel"))
+                            .accessibilityIdentifier("process-inbox-remove-extra-\(index)")
+                        }
+                    }
+                    actionButton(conversion.object("addAction").text("label"), id: "process-inbox-add-action") {
+                        Task { await model.editProcessInbox(conversion.object("addAction").object("edit"), conversionAction: "add") }
+                    }
+                    primaryButton(conversion.text("createLabel"), id: "process-inbox-create-project") {
+                        Task { await model.decideProcessInbox("createProject") }
+                    }
+                } else {
+                    Text(project.text("projectsLabel")).rnFont(13, .semibold).foregroundStyle(palette.secondary)
+                        .accessibilityAddTraits(.isHeader)
+                    if !project.object("current").isEmpty {
+                        ProcessInboxOption(ui: ui, value: project.object("current"), id: "process-inbox-project-current")
+                        let sections = project.object("sections")
+                        if !sections.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(sections.text("label")).rnFont(13, .semibold).foregroundStyle(palette.secondary)
+                                    .accessibilityAddTraits(.isHeader)
+                                options(sections.objects("options"), prefix: "process-inbox-section")
+                            }.padding(.leading, 16)
+                        }
+                    }
+                    let browse = project.object("browse")
+                    if !browse.isEmpty {
+                        let choices = browse.objects("options")
+                        let selected = choices.first { $0["selected"] as? Bool == true }?.text("label") ?? ""
+                        Menu {
+                            ForEach(choices.indices, id: \.self) { index in
+                                Button(choices[index].text("label")) {
+                                    Task { await model.editProcessInbox(choices[index].object("edit")) }
+                                }
+                            }
+                        } label: {
+                            Label("\(browse.text("label")): \(selected)", systemImage: "chevron.down")
+                                .rnFont(13).foregroundStyle(palette.secondary)
+                        }.disabled(!enabled).accessibilityIdentifier("process-inbox-browse-projects")
+                    }
+                    let search = project.object("search")
+                    if !search.isEmpty {
+                        let searchLayout = dynamicTypeSize.isAccessibilitySize
+                            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                            : AnyLayout(HStackLayout(spacing: 8))
+                        searchLayout {
+                            textInput("projectSearch", label: search.text("label"))
+                                .submitLabel(.done).onSubmit { Task { await model.decideProcessInbox("submitProjectSearch") } }
+                                .accessibilityIdentifier("process-inbox-project-search")
+                            if !search.text("createLabel").isEmpty {
+                                actionButton(search.text("createLabel"), id: "process-inbox-project-submit") {
+                                    Task { await model.decideProcessInbox("submitProjectSearch") }
+                                }
+                            }
+                        }
+                    }
+                    let projects = project.objects("projects")
+                    let deferredFrom = project.object("deferredFrom")
+                    let split = min(max(deferredFrom.number("index"), 0), projects.count)
+                    if deferredFrom.isEmpty || split == projects.count {
+                        options(projects, prefix: "process-inbox-project")
+                    } else {
+                        options(Array(projects[..<split]), prefix: "process-inbox-project")
+                        Text(deferredFrom.text("label")).rnFont(13, .semibold).foregroundStyle(palette.secondary)
+                            .accessibilityAddTraits(.isHeader).accessibilityIdentifier("process-inbox-deferred-projects")
+                        options(Array(projects[split...]), prefix: "process-inbox-project", offset: split)
+                    }
+                }
+            }
+            .sectionCard(palette)
+        }
+    }
+}
+
+private struct ProcessInboxSomedaySection: ProcessInboxPart {
+    let ui: ProcessInboxUI
+
+    var body: some View {
+        let section = view.object("somedaySections")
+        if !section.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(section.text("label")).rnFont(15, .semibold)
+                options(section.objects("options"), prefix: "process-inbox-someday")
+            }
+            .sectionCard(palette)
+        }
+    }
+}
+
+private struct ProcessInboxDelegateSection: ProcessInboxPart {
+    let ui: ProcessInboxUI
+
+    var body: some View {
+        let delegate = view.object("delegate")
+        if !delegate.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(delegate.text("title")).rnFont(16, .bold)
+                Text(delegate.text("hint")).rnFont(14).foregroundStyle(palette.secondary)
+                textInput("delegateWho", label: delegate.text("whoLabel"))
+                    .accessibilityIdentifier("process-inbox-delegate-who")
+                options(delegate.objects("whoSuggestions"), prefix: "process-inbox-delegate-person")
+                if !delegate.object("followUp").isEmpty { ProcessInboxDateRow(ui: ui, row: delegate.object("followUp")) }
+                if !delegate.object("request").text("message").isEmpty {
+                    ShareLink(item: delegate.object("request").text("message"),
+                              subject: Text(delegate.object("request").text("subject"))) {
+                        Text(delegate.text("sendLabel")).rnFont(14, .semibold)
+                            .foregroundStyle(palette.tint).frame(minHeight: 44)
+                    }
+                    .disabled(!enabled)
+                    .accessibilityIdentifier("process-inbox-delegate-share")
+                }
+            }
+            .sectionCard(palette)
+        }
+    }
+}
+
+private struct ProcessInboxTokenSection: ProcessInboxPart {
+    let ui: ProcessInboxUI
+    let tokens: CoreObject
+    let kind: String
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(tokens.text("title")).rnFont(15, .semibold)
+            if !tokens.text("selectedContextsLabel").isEmpty {
+                Text(tokens.text("selectedContextsLabel")).rnFont(12).foregroundStyle(palette.secondary)
+            }
+            options(tokens.objects("selectedContexts"), prefix: "process-inbox-" + kind + "-selected")
+            if !tokens.text("selectedTagsLabel").isEmpty {
+                Text(tokens.text("selectedTagsLabel")).rnFont(12).foregroundStyle(palette.secondary)
+            }
+            options(tokens.objects("selectedTags"), prefix: "process-inbox-" + kind + "-tag-selected")
+            let tokenLayout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                : AnyLayout(HStackLayout(spacing: 8))
+            tokenLayout {
+                textInput("tokenInput", label: tokens.text("placeholder"))
+                    .submitLabel(.done).onSubmit {
+                        if tokens.object("add").flag("enabled") {
+                            Task { await model.editProcessInbox(tokens.object("add").object("edit")) }
+                        }
+                    }
+                    .accessibilityIdentifier("process-inbox-" + kind + "-input")
+                actionButton(tokens.object("add").text("label"), id: "process-inbox-" + kind + "-add",
+                             active: tokens.object("add").flag("enabled")) {
+                    Task { await model.editProcessInbox(tokens.object("add").object("edit")) }
+                }
+            }
+            options(tokens.objects("suggestions"), prefix: "process-inbox-" + kind + "-suggestion")
+            if !tokens.text("contextSuggestionsLabel").isEmpty {
+                Text(tokens.text("contextSuggestionsLabel")).rnFont(12).foregroundStyle(palette.secondary)
+                options(tokens.objects("contextSuggestions"), prefix: "process-inbox-context-suggestion")
+            }
+            if !tokens.text("tagSuggestionsLabel").isEmpty {
+                Text(tokens.text("tagSuggestionsLabel")).rnFont(12).foregroundStyle(palette.secondary)
+                options(tokens.objects("tagSuggestions"), prefix: "process-inbox-tag-suggestion")
+            }
+        }
+        .sectionCard(palette)
+    }
+}
+
+private struct ProcessInboxMoreOptions: ProcessInboxPart {
+    let ui: ProcessInboxUI
+
+    var body: some View {
+        let more = view.object("moreOptions")
+        if !more.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Button { Task { await model.editProcessInbox(more.object("edit")) } } label: {
+                    HStack {
+                        Text(more.text("label")).rnFont(15, .semibold)
+                        Spacer()
+                        Image(systemName: more.flag("open") ? "chevron.up" : "chevron.down")
+                    }
+                    .frame(minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).disabled(!enabled)
+                .accessibilityValue(more.flag("open") ? model.label("markdown.collapse") : model.label("markdown.expand"))
+                .accessibilityIdentifier("process-inbox-more")
+                if more.flag("open") {
+                    let scheduling = more.object("scheduling")
+                    if !scheduling.isEmpty {
+                        Text(scheduling.text("title")).rnFont(15, .bold)
+                        ForEach(scheduling.objects("rows").indices, id: \.self) { index in
+                            ProcessInboxDateRow(ui: ui, row: scheduling.objects("rows")[index])
+                        }
+                    }
+                    let organization = more.object("organization")
+                    if !organization.isEmpty { ProcessInboxOrganization(ui: ui, section: organization) }
+                    let tags = more.object("tags")
+                    if !tags.isEmpty { ProcessInboxTokenSection(ui: ui, tokens: tags, kind: "tag") }
+                }
+            }
+            .sectionCard(palette)
+        }
+    }
+}
+
+private struct ProcessInboxOrganization: ProcessInboxPart {
+    let ui: ProcessInboxUI
+    let section: CoreObject
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(section.text("title")).rnFont(15, .bold)
+            if !section.text("priorityLabel").isEmpty {
+                Text(section.text("priorityLabel")).rnFont(13, .semibold)
+                options(section.objects("priorities"), prefix: "process-inbox-priority")
+            }
+            if !section.text("energyLabel").isEmpty {
+                Text(section.text("energyLabel")).rnFont(13, .semibold)
+                options(section.objects("energyLevels"), prefix: "process-inbox-energy")
+            }
+            if !section.text("timeEstimateLabel").isEmpty {
+                Text(section.text("timeEstimateLabel")).rnFont(13, .semibold)
+                options(section.objects("timeEstimates"), prefix: "process-inbox-estimate")
+            }
+            if !section.text("assignedToLabel").isEmpty {
+                Text(section.text("assignedToLabel")).rnFont(13, .semibold)
+                textInput("assignedTo", label: section.text("assignedToPlaceholder"))
+                    .accessibilityIdentifier("process-inbox-assigned-to")
+                options(section.objects("assignedToSuggestions"), prefix: "process-inbox-assigned-person")
+            }
+        }
+    }
+}
+
+private struct ProcessInboxFooter: ProcessInboxPart {
+    let ui: ProcessInboxUI
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if !view.text("fileIt").isEmpty {
+                primaryButton(view.text("fileIt"), id: "process-inbox-file") {
+                    Task { await model.decideProcessInbox("fileIt") }
+                }
+            }
+            if !view.text("back").isEmpty {
+                actionButton(view.text("back"), id: "process-inbox-back") {
+                    Task { await model.decideProcessInbox("back") }
+                }
+            }
+        }
+    }
+}
+
+private struct ProcessInboxCompleted: ProcessInboxPart {
+    let ui: ProcessInboxUI
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(model.inbox.object("empty").text("message").isEmpty ? model.label("common.done")
+                 : model.inbox.object("empty").text("message"))
+                .rnFont(20, .bold).accessibilityAddTraits(.isHeader)
+            primaryButton(model.label("common.close"), id: "process-inbox-finish") {
+                Task { await model.closeProcessInbox() }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct ProcessInboxMessages: ProcessInboxPart {
+    let ui: ProcessInboxUI
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            let notice = model.processInboxNotice
+            if !notice.isEmpty {
+                Text(notice.text("title")).rnFont(14, .semibold)
+                Text(notice.text("message")).rnFont(13)
+                    .foregroundStyle(notice.text("tone") == "error" ? palette.danger : palette.warning)
+                    .accessibilityIdentifier("process-inbox-notice")
+            }
+            if !model.processInboxToast.isEmpty && model.processInboxUndoLabel.isEmpty {
+                Text(model.processInboxToast).rnFont(13).foregroundStyle(palette.success)
+                    .accessibilityIdentifier("process-inbox-toast")
+            }
+            if let readError = model.processInboxReadError {
+                Text(readError).rnFont(13).foregroundStyle(palette.danger)
+                actionButton(model.label("common.retry"), id: "process-inbox-read-retry",
+                             requiresControls: false, active: !model.busy && !model.retryNeeded) {
+                    Task { await model.retryProcessInboxRead() }
+                }
+            }
+            if let processError = model.processInboxError {
+                Text(processError).rnFont(13).foregroundStyle(palette.danger)
+                    .accessibilityIdentifier("process-inbox-error")
+            }
+            if model.retryNeeded {
+                actionButton(model.label("common.retry"), id: "process-inbox-save-retry",
+                             requiresControls: false, active: !model.busy && model.retryNeeded) {
+                    Task { await model.retry() }
+                }
+            }
+        }
+    }
+}
+
+private struct ProcessInboxOption: ProcessInboxPart {
+    let ui: ProcessInboxUI
+    let value: CoreObject
+    let id: String
+
+    var body: some View {
+        let selected = value.flag("selected")
+        return Button { Task { await model.editProcessInbox(value.object("edit")) } } label: {
+            HStack(spacing: 6) {
+                if !value.text("color").isEmpty {
+                    Circle().fill(palette.einkSafe(Color(hex: value.text("color")))).frame(width: 8, height: 8)
+                }
+                Text(value.text("label")).rnFont(13, .semibold)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .foregroundStyle(selected ? palette.onTint : palette.text)
+            .padding(.horizontal, 12).frame(minHeight: 44)
+            .background(selected ? palette.tint : palette.card, in: Capsule())
+            .overlay(Capsule().stroke(selected ? palette.tint : palette.border, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!enabled)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier(id)
+    }
+}
+
+private extension View {
+    func sectionCard(_ palette: AppPalette) -> some View {
+        self.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(palette.card, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.border, lineWidth: 1))
+    }
+}

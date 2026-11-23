@@ -1,0 +1,117 @@
+name: "📱 Mobile UI Issue"
+description: Report mobile layout, interaction, keyboard, or touch-target problems
+title: "[MOBILE-UI] "
+labels: ["bug", "platform:mobile", "area:ui", "status:needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Please include diagnostics logs with your bug report.** Logs are especially important for sync, reminders, crashes, and problems we cannot reproduce. They help us identify what happened and avoid a round of follow-up questions.
+
+        In **Settings → Data → Diagnostics**, enable **Debug logging**, reproduce the problem if safe, then use **Share log** (mobile) or **Save log** (desktop). Attach the exported file below. If you cannot collect logs, explain why in the diagnostics field; you can still submit the report.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      multiple: true
+      options:
+        - "Android"
+        - "iOS"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      placeholder: v1.3.1
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Install channel
+      multiple: true
+      options:
+        - "Play Store"
+        - "F-Droid"
+        - "App Store"
+        - "TestFlight"
+        - "Release file / sideloaded APK"
+        - "Source / dev build"
+        - "Other"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS version
+      placeholder: Android 15
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device model
+      placeholder: Pixel 8
+    validations:
+      required: true
+  - type: dropdown
+    id: ui-type
+    attributes:
+      label: UI type
+      multiple: true
+      options:
+        - "Layout / spacing"
+        - "Keyboard overlap / input focus"
+        - "Tap target / gesture handling"
+        - "Modal / sheet behavior"
+        - "Navigation / back behavior"
+        - "Theme / visual rendering"
+        - "Other"
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What do you see?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics logs (strongly recommended)
+      description: |
+        Attach the log file by dragging it into this box. Include the approximate time of the problem and your timezone. For problems involving multiple devices, attach a log from each affected device and identify which is which.
+
+        Logs stay on your device until you share them and redact common credentials. Review files before posting: GitHub issues are public. Do not attach a full task database or backup. Instructions: https://docs.mindwtr.app/data-sync/diagnostics-logs
+
+        If logs are unavailable, explain why (for example, the app will not open). For a purely visual issue, a screenshot or recording plus a short explanation is fine.
+      placeholder: Attach logs here, or explain why you cannot provide them.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots / screen recording
+      description: |
+        Drag files into the box to attach them.
+
+        To record with fictional tasks instead of private content: **Settings → Data → Open sandbox**, then **Enter sandbox**; leave it from the sandbox banner. Some issues need your own data to reproduce. Details: https://docs.mindwtr.app/data-sync/diagnostics-logs#record-with-sample-data
+  - type: input
+    id: display
+    attributes:
+      label: Display size / font scale / orientation
+      description: Optional, but it often explains a layout problem.

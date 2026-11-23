@@ -1,0 +1,10 @@
+
+
+
+[Desktop Entry]
+Type=Application
+Name=Mindwtr
+Exec=mindwtr
+Icon=mindwtr
+Terminal=false
+NoDisplay=true

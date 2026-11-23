@@ -1,0 +1,54 @@
+name: mindwtr
+base: core22
+version: '1.3.9'
+summary: Get tasks out of your head and see the next step
+description: |
+  Mindwtr is a free, open-source to-do app built on the Getting Things Done
+  (GTD) method. Capture every task and idea in seconds, sort them with a
+  short guided pass, and see only what you can act on right now. A guided
+  weekly review keeps the list trustworthy.
+
+  Works completely offline with no account. Your data stays on your device;
+  sync is optional through Dropbox, a folder you control, WebDAV, or your
+  own server. Includes list, calendar, and kanban views, reminders,
+  repeating tasks, Markdown notes, and attachments.
+grade: stable
+confinement: strict
+
+apps:
+  mindwtr:
+    command: usr/bin/mindwtr
+    desktop: usr/share/applications/Mindwtr.desktop
+    extensions: [gnome]
+    environment:
+      ALSA_CONFIG_PATH: $SNAP/etc/mindwtr-asound.conf
+      ALSA_PLUGIN_DIR: $SNAP/usr/lib/alsa-lib
+    plugs:
+      - audio-playback
+      - audio-record
+      - home
+      - network
+      - network-bind
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
+
+parts:
+  mindwtr:
+    plugin: dump
+    source: apps/desktop/src-tauri/target/release/bundle/deb/mindwtr_1.3.9_amd64.deb
+    source-type: deb
+
+  alsa-pulse:
+    plugin: dump
+    source: snap/local/alsa-pulse
+    stage-packages:
+      - libasound2-plugins
+    organize:
+      asound.conf: etc/mindwtr-asound.conf
+      usr/lib/*/alsa-lib/libasound_module_pcm_pulse.so: usr/lib/alsa-lib/
+    stage:
+      - etc/mindwtr-asound.conf
+      - usr/lib/alsa-lib/libasound_module_pcm_pulse.so
+      - usr/share/doc/libasound2-plugins/copyright

@@ -1,0 +1,232 @@
+package tech.dongdongbh.mindwtr.pilot
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.absolutePadding
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.AbsoluteAlignment
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import org.json.JSONObject
+import kotlin.math.roundToInt
+
+
+@Composable
+fun RowScope.MenuTab(model: InboxViewModel) {
+    val theme = LocalTheme.current
+    val c = theme.colors
+    val open = model.menu.sheet
+    val color = if (open) c.tabIconSelected else c.tabIconDefault
+    val menuLabel = t("tab.menu")
+    val syncLabel = when (model.syncBadge.state) {
+        "syncing" -> t("settings.syncBadgeSyncing")
+        "healthy" -> t("settings.syncBadgeHealthy")
+        "attention" -> t("settings.syncBadgeWarning")
+        else -> null
+    }
+    Column(
+        Modifier.weight(1f).fillMaxHeight().rnTabPress(open) { model.menu.toggleSheet() }
+            .then(if (theme.isEink && syncLabel != null) Modifier.semantics { contentDescription = "$menuLabel, $syncLabel" } else Modifier),
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
+    ) {
+        Box {
+            Icon(Lucide.Menu, null, tint = color, modifier = Modifier.size(if (open) 26.dp else 24.dp).fade(if (open) 1f else RN_TAB_ICON_IDLE))
+
+
+            coreColorOrNull(model.syncBadge.color)?.let { dot ->
+                val syncIcon = if (theme.isEink) when (model.syncBadge.state) {
+                    "syncing" -> SettingsLucide.RefreshCw
+                    "healthy" -> Lucide.Check
+                    "attention" -> Lucide.TriangleAlert
+                    else -> null
+                } else null
+                if (syncIcon != null) Icon(syncIcon, null, tint = c.text,
+                    modifier = Modifier.align(Alignment.TopEnd).offset(x = 8.dp, y = (-3).dp).size(14.dp).background(c.cardBg, CircleShape).clearAndSetSemantics { }.testTag("menu-sync-${model.syncBadge.state}"))
+                else Box(Modifier.align(Alignment.TopEnd).offset(x = 7.dp, y = (-2).dp).size(7.dp).fade(0.85f).clip(CircleShape).background(dot)
+                    .rnBorder(1.5.dp, c.cardBg, CircleShape).clearAndSetSemantics { }.testTag("menu-sync-dot"))
+            }
+        }
+        Text(t("tab.menu"), style = rnText(10, if (open) 700 else 600, 12), color = color, maxLines = 1,
+            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+    }
+}
+
+
+private fun JSONObject.icon(): ImageVector? = Ionicons.bySymbol[getString("icon")]
+
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun MoreSheet(model: InboxViewModel) = with(model.menu) {
+    val theme = LocalTheme.current
+    val c = theme.colors
+    val density = LocalDensity.current
+    val height = LocalConfiguration.current.screenHeightDp
+    val hidden = with(density) { height.dp.toPx() }
+    val offset = remember { Animatable(hidden) }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(Unit) { offset.animateTo(0f, tween(220)) }
+    val dismiss = { scope.launch { offset.animateTo(hidden, tween(180)); closeSheet() }; Unit }
+    BackHandler { dismiss() }
+    Box(Modifier.fillMaxSize().testTag("more-sheet")) {
+        val close = t("common.close")
+        Box(Modifier.fillMaxSize().background(theme.sheetScrim).clickable(role = Role.Button) { dismiss() }.semantics { contentDescription = close })
+        val frame = LocalMoreSheetFrame.current
+        val shape = if (frame == null) RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp) else RoundedCornerShape(24.dp)
+        Column(
+            (if (frame == null) Modifier.align(Alignment.BottomCenter).fillMaxWidth().heightIn(max = (height * 0.82f).dp)
+            else Modifier.align(AbsoluteAlignment.BottomLeft).absolutePadding(left = frame.left.dp, bottom = frame.bottom.dp).width(frame.width.dp).heightIn(max = frame.maxHeight.dp))
+                .offset { IntOffset(0, offset.value.roundToInt()) }
+                .draggable(
+                    state = rememberDraggableState { delta -> scope.launch { offset.snapTo((offset.value + delta).coerceAtLeast(0f)) } },
+                    orientation = Orientation.Vertical,
+                    onDragStopped = { velocity ->
+                        val dragged = with(density) { offset.value.toDp() }
+                        if (dragged > 72.dp || (dragged > 24.dp && velocity > with(density) { 750.dp.toPx() })) dismiss()
+                        else scope.launch { offset.animateTo(0f, tween(140)) }
+                    },
+                )
+                .clip(shape).background(c.cardBg).rnBorder(1.dp, c.border, shape).pointerInput(Unit) { detectTapGestures { } }
+                .padding(start = 18.dp, end = 18.dp, top = 10.dp, bottom = 16.dp),
+        ) {
+            Box(Modifier.align(Alignment.CenterHorizontally).padding(bottom = 18.dp).size(44.dp, 5.dp).clip(RoundedCornerShape(3.dp)).background(c.border))
+            val sheet = more
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 8.dp)) {
+                if (sheet != null) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        for (item in sheet.view.list("utilities")) CompactItem(model, item, Modifier.weight(1f))
+                    }
+                    val searches = sheet.collection("savedSearches")
+                    if (searches.isNotEmpty()) {
+                        Column(Modifier.padding(top = 18.dp)) {
+                            Text(sheet.view.getString("savedSearchesTitle").uppercase(), style = rnText(12, 800), color = c.secondaryText,
+                                modifier = Modifier.padding(bottom = 8.dp))
+                            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                for (item in searches) CompactItem(model, item, Modifier.width(76.dp))
+                                if (searches.size < sheet.collectionTotal("savedSearches")) {
+                                    MoreChip(idle) { loadCollection("savedSearches") }
+                                }
+                            }
+                        }
+                    }
+                    Box(Modifier.padding(vertical = 12.dp).fillMaxWidth().height(1.dp).background(c.border))
+                    FlowRow(Modifier.fillMaxWidth(), maxItemsInEachRow = 3, horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        for (item in sheet.view.list("primary")) Tile(model, item, Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+@Composable
+private fun Tile(model: InboxViewModel, item: JSONObject, modifier: Modifier) {
+    val theme = LocalTheme.current
+    val c = theme.colors
+    val id = item.getString("id")
+    val opens = model.menu.opens(id)
+    val enabled = opens && model.menu.idle
+    val shape = RoundedCornerShape(8.dp)
+    val label = item.getString("label")
+    Column(
+        modifier.fade(if (enabled) 1f else 0.45f).heightIn(min = 104.dp).clip(shape).background(c.cardBg).rnBorder(1.dp, c.border, shape)
+
+
+            .clearAndSetSemantics {
+                contentDescription = label; role = Role.Button
+                if (enabled) onClick { model.menu.openTile(id); true } else disabled()
+            }
+            .clickable(enabled = enabled) { model.menu.openTile(id) }
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
+    ) {
+        Box(Modifier.padding(bottom = 8.dp).size(44.dp).clip(shape).background(c.filterBg), contentAlignment = Alignment.Center) {
+            item.icon()?.let { Icon(it, null, tint = theme.identityColorOrNull(item.getString("iconColor")) ?: c.tint, modifier = Modifier.size(24.dp)) }
+        }
+        Text(item.getString("displayLabel"), style = rnText(12, 700, 15), color = c.text, textAlign = TextAlign.Center, maxLines = 2,
+            overflow = TextOverflow.Ellipsis)
+    }
+}
+
+
+@Composable
+private fun CompactItem(model: InboxViewModel, item: JSONObject, modifier: Modifier) {
+    val theme = LocalTheme.current
+    val c = theme.colors
+    val id = item.getString("id")
+    val opens = model.menu.opens(id)
+    val enabled = opens && model.menu.idle
+    val label = item.getString("label")
+    Column(
+        modifier.heightIn(min = 58.dp).clip(RoundedCornerShape(8.dp))
+
+
+            .clearAndSetSemantics {
+                contentDescription = label; role = Role.Button
+                if (enabled) onClick { model.menu.openTile(id); true } else disabled()
+            }
+            .clickable(enabled = enabled) { model.menu.openTile(id) }.fade(if (enabled) 1f else 0.45f)
+            .padding(horizontal = 2.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
+    ) {
+        item.icon()?.let { Icon(it, null, tint = theme.identityColorOrNull(item.getString("iconColor")) ?: c.tint, modifier = Modifier.size(18.dp).fade(0.64f)) }
+        Text(item.getString("displayLabel"), style = rnText(10, 700, 12), color = c.secondaryText, textAlign = TextAlign.Center, maxLines = 2,
+            overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp).heightIn(min = 16.dp))
+    }
+}
+
+private fun JSONObject.list(name: String): List<JSONObject> = optJSONArray(name)?.let { items -> List(items.length()) { items.getJSONObject(it) } }.orEmpty()

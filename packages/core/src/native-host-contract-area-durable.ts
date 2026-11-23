@@ -1,0 +1,115 @@
+import type { NativeHostResult } from './native-host-contract';
+import { flushPendingSave, getPersistenceStatus, getStorageAdapter, useTaskStore } from './store';
+import { taskEditValuesEqual } from './json-value-equality';
+import { buildSaveSnapshot } from './store-helpers';
+import { NativeReceiptSqliteAdapter } from './native-request-receipts';
+import type { AppSettings } from './types';
+import type { PreparedAreaAuthority, PreparedNativeSaveBoundary, TaskStore } from './store-types';
+
+const failure = (code: 'STALE_REVISION' | 'SAVE_FAILED', message: string): NativeHostResult<never> =>
+    ({ ok: false, error: { code, message } });
+
+
+export async function readAreaDurableData(allowFailedSave = false, rawTasks = false): Promise<NativeHostResult<{
+    adapter: ReturnType<typeof getStorageAdapter>; authority: PreparedAreaAuthority;
+}>> {
+    const adapter = getStorageAdapter();
+    const state = useTaskStore.getState();
+    let snapshot;
+    try {
+        if (!allowFailedSave || !state.persistenceFailure) await flushPendingSave();
+        snapshot = await adapter.getData(rawTasks ? { rawTasks: true } : undefined);
+    } catch { return failure('SAVE_FAILED', 'Area operation could not read saved data'); }
+    if (storeMoved(adapter, state)) return failure('STALE_REVISION', 'Area data changed while reading saved data');
+    return { ok: true, value: { adapter, authority: { snapshot, state } } };
+}
+
+function storeMoved(adapter: ReturnType<typeof getStorageAdapter>, state: TaskStore): boolean {
+    const current = useTaskStore.getState();
+    return getStorageAdapter() !== adapter || current._allTasks !== state._allTasks
+        || current._allAreas !== state._allAreas || current._allProjects !== state._allProjects
+        || current._allSections !== state._allSections || current._allPeople !== state._allPeople
+        || current.settings !== state.settings || current.lastDataChangeAt !== state.lastDataChangeAt;
+}
+
+export async function readDurableSettings(): Promise<NativeHostResult<AppSettings>> {
+    const adapter = getStorageAdapter();
+    if (adapter instanceof NativeReceiptSqliteAdapter && adapter.concurrentWritesGuarded) {
+        const state = useTaskStore.getState();
+        try { await flushPendingSave(); } catch { return failure('SAVE_FAILED', 'Area operation could not read saved data'); }
+        const light = await adapter.readRowBaseline().catch(() => null);
+        if (light) return storeMoved(adapter, state) ? failure('STALE_REVISION', 'Area data changed while reading saved data')
+            : { ok: true, value: light.settings };
+    }
+    const read = await readAreaDurableData();
+    return read.ok ? { ok: true, value: read.value.authority.snapshot.settings } : read;
+}
+
+
+export function createAreaSaveGuard(save: () => Promise<NativeHostResult<null>>) {
+    let failedSave: { prepared: unknown; adapter: ReturnType<typeof getStorageAdapter>;
+        failure: NonNullable<TaskStore['persistenceFailure']>; generation: number;
+        lastDataChangeAt: number; taskReference: TaskStore['_allTasks'];
+        sameSnapshot?: { serialized: string; projects: TaskStore['_allProjects']; sections: TaskStore['_allSections'];
+            areas: TaskStore['_allAreas']; people: TaskStore['_allPeople']; settings: TaskStore['settings'] } } | null = null;
+    const owns = (prepared: unknown, adapter: ReturnType<typeof getStorageAdapter>, state: TaskStore) => {
+        const status = getPersistenceStatus();
+        return Boolean(failedSave && taskEditValuesEqual(failedSave.prepared, prepared)
+            && failedSave.adapter === adapter && failedSave.failure === state.persistenceFailure
+            && failedSave.generation === status.generation && failedSave.lastDataChangeAt === state.lastDataChangeAt
+            && failedSave.taskReference === state._allTasks && !status.queued && !status.inFlight
+            && !status.immediate && !status.retrying);
+    };
+    return {
+        rememberSameSnapshotFailure(prepared: unknown, adapter: ReturnType<typeof getStorageAdapter>): void {
+            const state = useTaskStore.getState();
+            if (!failedSave || !owns(prepared, adapter, state)) return;
+            try { failedSave.sameSnapshot = { serialized: JSON.stringify(buildSaveSnapshot(state)),
+                projects: state._allProjects, sections: state._allSections, areas: state._allAreas,
+                people: state._allPeople, settings: state.settings }; } catch { }
+        },
+        refreshSameSnapshotFailure(prepared: unknown, adapter: ReturnType<typeof getStorageAdapter>): boolean {
+            const state = useTaskStore.getState(), status = getPersistenceStatus(), captured = failedSave?.sameSnapshot;
+            if (!failedSave || !captured || !state.persistenceFailure || !taskEditValuesEqual(failedSave.prepared, prepared)
+                || failedSave.adapter !== adapter || getStorageAdapter() !== adapter
+                || failedSave.lastDataChangeAt !== state.lastDataChangeAt || failedSave.taskReference !== state._allTasks
+                || captured.projects !== state._allProjects || captured.sections !== state._allSections
+                || captured.areas !== state._allAreas || captured.people !== state._allPeople || captured.settings !== state.settings
+                || status.queued || status.inFlight || status.immediate || status.retrying) return false;
+            try { if (captured.serialized !== JSON.stringify(buildSaveSnapshot(state))) return false; } catch { return false; }
+            failedSave.failure = state.persistenceFailure;
+            failedSave.generation = status.generation;
+            return true;
+        },
+        mayApply(prepared: unknown, adapter: ReturnType<typeof getStorageAdapter>): boolean {
+            const state = useTaskStore.getState();
+            return !state.persistenceFailure || owns(prepared, adapter, state);
+        },
+        async finish(prepared: unknown, adapter: ReturnType<typeof getStorageAdapter>, replayed: boolean,
+            boundary: PreparedNativeSaveBoundary | undefined): Promise<NativeHostResult<null>> {
+            const savingState = useTaskStore.getState();
+            const savingStatus = getPersistenceStatus();
+            const ownWrite = boundary && getStorageAdapter() === adapter
+                && boundary.taskReference === savingState._allTasks && boundary.lastDataChangeAt === savingState.lastDataChangeAt
+                && boundary.generation === savingStatus.generation && boundary.failure === savingState.persistenceFailure;
+            if (replayed && savingState.persistenceFailure) {
+                if (!owns(prepared, adapter, savingState))
+                    return failure('SAVE_FAILED', 'Area operation has an unresolved persistence failure');
+                useTaskStore.setState({ persistenceFailure: null });
+                failedSave = null;
+            }
+
+            const saved = await save();
+            const after = useTaskStore.getState();
+            const status = getPersistenceStatus();
+            if (ownWrite && !saved.ok && saved.error.code === 'SAVE_FAILED' && after.persistenceFailure
+                && after.persistenceFailure !== savingState.persistenceFailure && getStorageAdapter() === adapter
+                && status.generation === savingStatus.generation
+                && after.lastDataChangeAt === savingState.lastDataChangeAt && after._allTasks === savingState._allTasks) {
+                failedSave = { prepared, adapter, failure: after.persistenceFailure, generation: status.generation,
+                    lastDataChangeAt: after.lastDataChangeAt, taskReference: after._allTasks };
+            } else if (saved.ok) failedSave = null;
+            return saved;
+        },
+    };
+}

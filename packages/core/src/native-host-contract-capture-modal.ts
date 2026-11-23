@@ -1,0 +1,508 @@
+
+
+
+import { executeCaptureTransaction, type CaptureTaskPlan } from './capture';
+import {
+    buildCaptureModalRequest,
+    buildCaptureModalView,
+    checkCaptureModalLines,
+    createCaptureModalDraft,
+    getCaptureModalBulkConfirm,
+    getProjectQuickCaptureReturnToProjectId,
+    planCaptureModalRequest,
+    readCaptureModalInitialProps,
+    readCaptureModalInitialDestination,
+    readCaptureModalOrigin,
+    readCaptureModalProjectParam,
+    resolveCaptureModalAfterSave,
+    applyCaptureModalEdit,
+    sanitizeCaptureReturnToParam,
+    saveCaptureModalLines,
+    type CaptureModalDraft,
+    type CaptureModalEdit,
+    type CaptureModalParams,
+    type CaptureModalView,
+} from './capture-modal-model';
+import { isAIKeyRequired } from './ai-config';
+import type { DateFormatter } from './date';
+import type { TranslateFn } from './i18n';
+import { NATIVE_HOST_CONTRACT_VERSION, type NativeHostResult } from './native-host-contract';
+import { fail, isObjectRecord, isText, isTimeEstimate } from './native-host-contract-menu-views';
+import { captureProjectId, captureProjects, isTaskOfPlan } from './native-host-contract-quick-capture';
+import { createNativeRequestReceipts, withRequestProject } from './native-request-receipts';
+import { buildQuickAddParseOptions, parseQuickAdd, splitQuickAddBulkLines, type QuickAddParseOptions } from './quick-add';
+import { buildQuickCaptureDestinationPicker, buildQuickCaptureView, createQuickCaptureOptions,
+    getQuickCaptureInvalidDateNotice, resolveQuickCaptureDefaultAreaId, type QuickCaptureContext, type QuickCaptureNotice } from './quick-capture-model';
+import { captureDestinationProps, readCaptureDestination, resolveCaptureDestination, type CaptureDestination } from './capture-destination';
+import { resolveFeatureFlags } from './resolve-feature-flags';
+import { useTaskStore } from './store';
+import type { Project, Task } from './types';
+import type { NativeAttachmentsHost } from './native-host-contract-attachments';
+import { logInfo } from './logger';
+import { getBareHttpUrl } from './attachment-link-utils';
+
+type CaptureModalDeps = {
+    readiness: () => NativeHostResult<null>;
+    save: () => Promise<NativeHostResult<null>>;
+
+    revision: (now: Date) => string;
+    t: () => TranslateFn;
+
+    formatDate: () => DateFormatter;
+    requestIdPattern: RegExp;
+
+    aiBound: () => boolean;
+
+    attachments: () => NativeAttachmentsHost | null;
+};
+
+export type NativeCaptureModalView = CaptureModalView & {
+    version: typeof NATIVE_HOST_CONTRACT_VERSION;
+
+    revision: string;
+    destination: ReturnType<typeof buildQuickCaptureView>['destination'];
+    destinationPicker: ReturnType<typeof buildQuickCaptureDestinationPicker>;
+};
+
+export type NativeCaptureModalDraft = CaptureModalDraft & {
+    initialDestination?: CaptureDestination;
+    destination?: CaptureDestination;
+};
+type NativeCaptureModalEdit = CaptureModalEdit | { type: 'selectDestination'; destination: CaptureDestination };
+
+
+export type NativeCaptureModalClose = { returnTo: string | null; returnToPreviousApp: boolean; returnToProjectId?: string };
+
+export type NativeCaptureModalSubmitResult =
+
+    | { kind: 'nothing' }
+
+    | { kind: 'confirmLines'; confirm: ReturnType<typeof getCaptureModalBulkConfirm>; lineCount: number }
+
+    | { kind: 'refused'; notice: QuickCaptureNotice }
+    | {
+        kind: 'saved';
+        taskId: string;
+        projectId: string | null;
+
+
+        next: 'close' | 'open' | 'openInProject';
+
+        close: NativeCaptureModalClose | null;
+    };
+
+export type NativeCaptureModalLinesResult =
+    | { kind: 'saved'; taskIds: string[]; close: NativeCaptureModalClose }
+
+    | { kind: 'refused'; notice: QuickCaptureNotice };
+
+const TEXT_LIMIT = 100_000;
+const NOTE_LIMIT = 500_000;
+const PARAM_KEYS = new Set<string>(['initialProps', 'initialValue', 'origin', 'project', 'returnTo', 'text', 'title']);
+const DRAFT_KEYS = ['text', 'description', 'showHelp', 'suggestion', 'applied', 'failed'];
+const PART_KINDS = new Set<string>(['context', 'timeEstimate', 'tag']);
+
+
+export const CAPTURE_MODAL_PARAM_LIMIT = NOTE_LIMIT;
+const isParamValue = (value: unknown) => isText(value, CAPTURE_MODAL_PARAM_LIMIT)
+    || (Array.isArray(value) && value.length <= 16 && value.every((entry) => isText(entry, CAPTURE_MODAL_PARAM_LIMIT)));
+const readParams = (value: unknown): CaptureModalParams | null => (
+    isObjectRecord(value) && Object.entries(value).every(([key, entry]) => PARAM_KEYS.has(key) && (entry === undefined || isParamValue(entry)))
+        ? value as CaptureModalParams
+        : null
+);
+const isTagList = (value: unknown) => Array.isArray(value) && value.length <= 100 && value.every((entry) => isText(entry) && entry.length > 0);
+
+const isCopilotRecord = (value: unknown, tagsRequired: boolean): boolean => {
+    if (!isObjectRecord(value)) return false;
+    if (Object.keys(value).some((key) => key !== 'context' && key !== 'timeEstimate' && key !== 'tags')) return false;
+    return (value.context === undefined || (isText(value.context) && value.context.length > 0))
+        && (value.timeEstimate === undefined || isTimeEstimate(value.timeEstimate))
+        && (tagsRequired ? isTagList(value.tags) : value.tags === undefined || isTagList(value.tags));
+};
+const readDraftValue = (value: unknown): NativeCaptureModalDraft | null => {
+    if (!isObjectRecord(value) || Object.keys(value).some(key => !DRAFT_KEYS.includes(key) && key !== 'destination' && key !== 'initialDestination')
+        || !DRAFT_KEYS.every((key) => key in value)) return null;
+    const valid = isText(value.text, TEXT_LIMIT) && isText(value.description, NOTE_LIMIT)
+        && typeof value.showHelp === 'boolean' && typeof value.failed === 'boolean'
+        && (value.suggestion === null || isCopilotRecord(value.suggestion, false))
+        && isCopilotRecord(value.applied, true)
+        && (value.destination === undefined || readCaptureDestination(value.destination) !== null)
+        && (value.initialDestination === undefined || readCaptureDestination(value.initialDestination) !== null);
+    return valid ? value as NativeCaptureModalDraft : null;
+};
+
+const DRAFT_FIELDS = ['description', 'startTime', 'reviewAt', 'assignedTo', 'energyLevel', 'timeEstimate'] as const;
+const sameValue = (left: unknown, right: unknown) => JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+
+
+const isTaskOfDraft = (task: Task, plan: CaptureTaskPlan, requestId: string, text: string, first = true): boolean => {
+    if (!isTaskOfPlan(task, plan, requestId) || !DRAFT_FIELDS.every((field) => sameValue(task[field], plan.props[field]))) return false;
+    const actual = task.attachments?.map((attachment) => attachment.uri);
+    const planned = first ? plan.props.attachments?.map((attachment) => attachment.uri) : undefined;
+    if (sameValue(actual, planned)) return true;
+    const bareUrl = getBareHttpUrl(text);
+    return bareUrl === plan.title && sameValue(actual, [...(planned ?? []), bareUrl]);
+};
+
+const isEdit = (edit: unknown): edit is NativeCaptureModalEdit => {
+    if (!isObjectRecord(edit)) return false;
+    switch (edit.type) {
+        case 'selectDestination':
+            return Object.keys(edit).length === 2 && readCaptureDestination(edit.destination) !== null;
+        case 'setText':
+            return isText(edit.value, TEXT_LIMIT);
+        case 'setDescription':
+            return isText(edit.value, NOTE_LIMIT);
+        case 'toggleHelp':
+            return true;
+        case 'applyCopilot':
+            return Array.isArray(edit.parts) && edit.parts.length <= 100 && edit.parts.every((part) => (
+                isObjectRecord(part) && PART_KINDS.has(part.kind as string) && isText(part.value) && part.value.length > 0
+            ));
+        case 'setSuggestion':
+            return isText(edit.title, TEXT_LIMIT) && isCopilotRecord(edit.suggestion, false);
+        default:
+            return false;
+    }
+};
+
+export function createCaptureModalMethods(deps: CaptureModalDeps) {
+
+    let cachedParseOptions: { key: unknown[]; options: QuickAddParseOptions } | null = null;
+    const parseOptions = () => {
+        const state = useTaskStore.getState();
+        const key = [state.tasks, state._allTasks, state.people, state.settings];
+        if (!cachedParseOptions || cachedParseOptions.key.some((entry, index) => entry !== key[index])) {
+            cachedParseOptions = { key, options: buildQuickAddParseOptions(state.settings, state) };
+        }
+        return cachedParseOptions.options;
+    };
+    const receipts = createNativeRequestReceipts({
+        save: async () => {
+            try {
+                if (useTaskStore.getState().persistenceFailure) await useTaskStore.getState().retryPersistence();
+            } catch (error) {
+                return fail('SAVE_FAILED', error instanceof Error ? error.message : String(error));
+            }
+            return deps.save();
+        },
+    });
+    const notApplied = (message: string | undefined): NativeHostResult<never> => fail('ACTION_FAILED', message ?? 'Failed to add task');
+
+
+    const presetOf = (params: CaptureModalParams): Partial<Task> => {
+        const state = useTaskStore.getState();
+        const { attachments: shared, ...preset } = readCaptureModalInitialProps(params.initialProps, state.projects, state.areas);
+        const managed = deps.attachments()?.canUploadAttachmentFrom;
+        const attachments = managed ? shared?.filter((attachment) => managed(attachment.uri)) : undefined;
+        return attachments?.length ? { ...preset, attachments } : preset;
+    };
+    const parse = (text: string, projects: readonly Project[]) => (
+        parseQuickAdd(text, projects as Project[], new Date(), useTaskStore.getState().areas, parseOptions())
+    );
+    const requestFor = (params: CaptureModalParams, draft: NativeCaptureModalDraft, text: string, projects: readonly Project[]) => {
+        const state = useTaskStore.getState();
+        const request = buildCaptureModalRequest({
+            parsed: parse(text, projects),
+            text,
+            projects,
+            initialProps: { ...presetOf(params), ...(draft.initialDestination ? captureDestinationProps(draft.initialDestination) : {}) },
+            projectParam: readCaptureModalProjectParam(params),
+
+            defaultAreaId: draft.initialDestination ? undefined : resolveQuickCaptureDefaultAreaId(state.settings, state.areas) ?? undefined,
+            description: draft.description,
+            copilot: draft.applied,
+            timeEstimatesEnabled: resolveFeatureFlags(state.settings).timeEstimates,
+        });
+        if (!draft.initialDestination && !draft.destination) return request;
+        const resolved = resolveCaptureDestination({ ...request.input, areas: state.areas, sections: state.sections,
+            destination: draft.destination });
+        return { input: { ...request.input, areas: state.areas, sections: state.sections,
+            destination: resolved.projectToCreate && resolved.available ? undefined : resolved.destination },
+        options: { ...request.options, transformProps: (props: Partial<Task>) => {
+            const next = request.options.transformProps?.(props) ?? props;
+            if (next.projectId === undefined) delete next.projectId;
+            if (next.sectionId === undefined) delete next.sectionId;
+            return next;
+        } } };
+    };
+
+
+    const ownedProjects = (requestId: string, params: CaptureModalParams, draft: NativeCaptureModalDraft, texts: readonly string[]): Project[] | null => {
+        let projects: Project[] = [...useTaskStore.getState().projects];
+        for (const text of texts) {
+
+            const bare = planCaptureModalRequest(requestFor(params, draft, text, []));
+            const title = bare.success ? bare.projectToCreate?.title : undefined;
+            if (!title) continue;
+            const matched = withRequestProject(projects, captureProjectId(requestId, title), title);
+            if (!matched) return null;
+            projects = matched;
+        }
+        return projects;
+    };
+    const projectGone = () => fail('STALE_REVISION', 'The project this capture created is gone');
+    const copilotSettings = () => {
+        const { settings } = useTaskStore.getState();
+        return {
+            aiEnabled: settings.ai?.enabled === true,
+            keyRequired: isAIKeyRequired(settings),
+
+            hasKey: deps.aiBound(),
+            timeEstimatesEnabled: resolveFeatureFlags(settings).timeEstimates,
+        };
+    };
+    const view = (params: CaptureModalParams, draft: NativeCaptureModalDraft, destinationQuery = ''): NativeCaptureModalView => {
+        const state = useTaskStore.getState();
+        const now = new Date();
+        const ai = copilotSettings();
+        const request = requestFor(params, draft, draft.text, state.projects);
+        const resolved = resolveCaptureDestination({ ...request.input, areas: state.areas, sections: state.sections });
+        const context: QuickCaptureContext = { settings: state.settings, projects: state.projects, areas: state.areas,
+            sections: state.sections, parseOptions: parseOptions(), focusedCount: 0, defaultAreaId: null,
+            now, t: deps.t(), formatDate: deps.formatDate() };
+        const options = { ...createQuickCaptureOptions(context), destination: resolved.destination };
+        const destination = buildQuickCaptureView('', options, context).destination;
+        const picker = buildQuickCaptureDestinationPicker('', options, context, destinationQuery);
+        return {
+            ...buildCaptureModalView(draft, {
+                t: deps.t(),
+                settings: state.settings,
+                projects: state.projects,
+                areas: state.areas,
+                tasks: state.tasks,
+                initialProps: presetOf(params),
+                parsed: parse(draft.text, state.projects),
+                formatDate: deps.formatDate(),
+                aiKey: { required: ai.keyRequired, available: ai.hasKey },
+            }),
+            version: NATIVE_HOST_CONTRACT_VERSION,
+            revision: deps.revision(now),
+            destination: { ...destination, ...(resolved.projectToCreate ? { label: resolved.projectToCreate.title,
+                accessibilityLabel: resolved.projectToCreate.title, pendingProjectTitle: resolved.projectToCreate.title } : {}) },
+            destinationPicker: { ...picker, items: picker.items.slice(0, 100) },
+        };
+    };
+    const closeOf = (params: CaptureModalParams, returnToPreviousApp: boolean): NativeCaptureModalClose => {
+        const returnTo = sanitizeCaptureReturnToParam(params.returnTo);
+        const projectId = getProjectQuickCaptureReturnToProjectId(returnTo);
+        const live = projectId !== null && useTaskStore.getState()._allProjects.some((project) => project.id === projectId && !project.deletedAt);
+        return { returnTo, returnToPreviousApp, ...(live ? { returnToProjectId: projectId } : {}) };
+    };
+
+
+    const readScreen = (input: unknown): NativeHostResult<{ params: CaptureModalParams; draft: NativeCaptureModalDraft }> => {
+        const ready = deps.readiness();
+        if (!ready.ok) return ready;
+        if (!isObjectRecord(input)) return fail('INVALID_INPUT', 'params and draft are required');
+        const params = readParams(input.params);
+        if (!params) return fail('INVALID_INPUT', 'params must hold the screen\'s route params as text');
+        const draft = readDraftValue(input.draft);
+        if (!draft) return fail('INVALID_INPUT', 'draft must hold every field of the screen\'s draft with a valid value');
+        return { ok: true, value: { params, draft } };
+    };
+
+    return {
+
+        openCaptureModal(input: { params: CaptureModalParams }): NativeHostResult<{ draft: NativeCaptureModalDraft; view: NativeCaptureModalView }> {
+            const ready = deps.readiness();
+            if (!ready.ok) return ready;
+            const params = isObjectRecord(input) ? readParams(input.params) : null;
+            if (!params) return fail('INVALID_INPUT', 'params must hold the screen\'s route params as text');
+            const contextual = readCaptureModalInitialDestination(params.initialProps);
+            if (contextual === null) return fail('INVALID_INPUT', 'Initial destination must contain bounded IDs');
+            const initial = createCaptureModalDraft(params, presetOf(params));
+            const request = requestFor(params, initial, '', useTaskStore.getState().projects);
+            const initialDestination = contextual ?? resolveCaptureDestination({ ...request.input,
+                parsed: { props: {} }, areas: useTaskStore.getState().areas, sections: useTaskStore.getState().sections }).destination;
+            const draft: NativeCaptureModalDraft = { ...initial, initialDestination };
+            return { ok: true, value: { draft, view: view(params, draft) } };
+        },
+
+
+        getCaptureModalView(input: { params: CaptureModalParams; draft: NativeCaptureModalDraft; destinationQuery?: string }): NativeHostResult<NativeCaptureModalView> {
+            const read = readScreen(input);
+            if (!read.ok) return read;
+            if (input.destinationQuery !== undefined && !isText(input.destinationQuery, 500)) return fail('INVALID_INPUT', 'Destination search must be bounded text');
+            return { ok: true, value: view(read.value.params, read.value.draft, input.destinationQuery) };
+        },
+
+
+        editCaptureModal(input: {
+            params: CaptureModalParams;
+            draft: NativeCaptureModalDraft;
+            edit: NativeCaptureModalEdit;
+        }): NativeHostResult<{ draft: NativeCaptureModalDraft; view: NativeCaptureModalView }> {
+            const read = readScreen(input);
+            if (!read.ok) return read;
+            if (!isEdit(input.edit)) return fail('INVALID_INPUT', 'edit is not a valid capture screen edit');
+            const draft = input.edit.type === 'selectDestination' ? { ...read.value.draft, destination: input.edit.destination }
+                : applyCaptureModalEdit(read.value.draft, input.edit, copilotSettings());
+            if (!draft) return fail('INVALID_INPUT', 'edit names a copilot part the screen does not show');
+            return { ok: true, value: { draft, view: view(read.value.params, draft) } };
+        },
+
+
+        async submitCaptureModal(input: {
+            params: CaptureModalParams;
+            draft: NativeCaptureModalDraft;
+            captureId: string;
+            openAfterSave?: boolean;
+        }): Promise<NativeHostResult<NativeCaptureModalSubmitResult>> {
+            const read = readScreen(input);
+            if (!read.ok) return read;
+            if (input.openAfterSave !== undefined && typeof input.openAfterSave !== 'boolean') {
+                return fail('INVALID_INPUT', 'openAfterSave must be a boolean');
+            }
+            const { params, draft } = read.value;
+            if (!draft.text.trim()) return { ok: true, value: { kind: 'nothing' } };
+            const lines = splitQuickAddBulkLines(draft.text);
+            if (lines.length > 1) {
+                return { ok: true, value: { kind: 'confirmLines', confirm: getCaptureModalBulkConfirm(lines, deps.t()), lineCount: lines.length } };
+            }
+
+            const planned = planCaptureModalRequest(requestFor(params, draft, draft.text, useTaskStore.getState().projects));
+            if (!planned.success && planned.reason !== 'destination-unavailable') {
+                return planned.reason === 'invalid-date-command'
+                    ? { ok: true, value: { kind: 'refused', notice: getQuickCaptureInvalidDateNotice(deps.t(), planned.invalidDateCommands) } }
+                    : notApplied(undefined);
+            }
+            const openAfterSave = input.openAfterSave === true;
+            const captureId = input.captureId;
+            const result = await receipts.run<NativeCaptureModalSubmitResult>(
+                captureId,
+                JSON.stringify(['captureModal', params, draft.text, draft.description, draft.applied, openAfterSave,
+                    ...(draft.initialDestination || draft.destination ? [draft.initialDestination ?? null, draft.destination ?? null] : [])]),
+                async () => {
+                    const saved = (taskId: string, projectId: string | undefined): NativeHostResult<NativeCaptureModalSubmitResult> => {
+                        const after = resolveCaptureModalAfterSave({
+                            openAfterSave, taskId, projectId, returnTo: sanitizeCaptureReturnToParam(params.returnTo), origin: readCaptureModalOrigin(params),
+                        });
+                        return {
+                            ok: true,
+                            value: {
+                                kind: 'saved',
+                                taskId,
+                                projectId: projectId ?? null,
+                                next: after.kind,
+                                close: after.kind === 'open' ? null : closeOf(params, after.kind === 'close' && after.returnToPreviousApp),
+                            },
+                        };
+                    };
+                    const owned = ownedProjects(captureId, params, draft, [draft.text]);
+                    if (!owned) return projectGone();
+                    const request = requestFor(params, draft, draft.text, owned);
+
+
+                    const existing = useTaskStore.getState()._allTasks.find((task) => task.id === captureId.toLowerCase());
+                    if (existing) {
+                        const plan = planCaptureModalRequest(request);
+                        return plan.success && isTaskOfDraft(existing, plan, captureId, draft.text)
+                            ? saved(existing.id, existing.projectId)
+                            : fail('INVALID_INPUT', 'Capture ID already belongs to another task');
+                    }
+                    try {
+                        const projects = captureProjects(captureId);
+                        const result = await executeCaptureTransaction(request.input, {
+                            addProject: projects.addProject,
+                            addTask: (title, props) => useTaskStore.getState().addTask(title, props, { captureId }),
+                        }, request.options);
+                        if (projects.made.stale) return projectGone();
+                        if (!result.success) return notApplied('error' in result ? result.error : result.reason);
+                        return saved(result.createdTaskId ?? captureId.toLowerCase(), result.props.projectId);
+                    } catch (error) {
+                        return notApplied(error instanceof Error ? error.message : String(error));
+                    }
+                },
+            );
+            if (result.ok && result.value.kind === 'saved' && (draft.initialDestination || draft.destination)) {
+                logInfo('Native capture destination persisted', { scope: 'capture', force: true,
+                    context: { releaseCheck: 'v1.3.9/native-capture-destination', kind: 'modal', outcome: 'saved' } });
+            }
+            return result;
+        },
+
+
+        async submitCaptureModalLines(input: {
+            params: CaptureModalParams;
+            draft: NativeCaptureModalDraft;
+            captureIds: string[];
+        }): Promise<NativeHostResult<NativeCaptureModalLinesResult>> {
+            const read = readScreen(input);
+            if (!read.ok) return read;
+            const { params, draft } = read.value;
+            const lines = splitQuickAddBulkLines(draft.text);
+            if (lines.length < 2) return fail('INVALID_INPUT', 'text must hold several lines');
+            const ids = input.captureIds;
+            if (!Array.isArray(ids) || ids.length !== lines.length
+                || !ids.every((id) => typeof id === 'string' && deps.requestIdPattern.test(id))
+                || new Set(ids.map((id) => id.toLowerCase())).size !== ids.length) {
+                return fail('INVALID_INPUT', 'Send one distinct capture UUID per line');
+            }
+            const buildRequest = async (line: string, projects: readonly Project[]) => requestFor(params, draft, line, projects);
+
+            const refusal = await checkCaptureModalLines({ lines, projects: useTaskStore.getState().projects, buildRequest });
+            if (refusal?.kind === 'refused') {
+                return { ok: true, value: { kind: 'refused', notice: getQuickCaptureInvalidDateNotice(deps.t(), refusal.invalidDateCommands) } };
+            }
+            const taskIds = ids.map((id) => id.toLowerCase());
+            const close = closeOf(params, readCaptureModalOrigin(params) === 'system');
+            const result = await receipts.run<NativeCaptureModalLinesResult>(
+                ids[0],
+                JSON.stringify(['captureModalLines', params, draft.text, draft.description, draft.applied, ids,
+                    ...(draft.initialDestination || draft.destination ? [draft.initialDestination ?? null, draft.destination ?? null] : [])]),
+                async () => {
+                    const state = useTaskStore.getState();
+
+                    const owned = ownedProjects(ids[0], params, draft, lines);
+                    if (!owned) return projectGone();
+
+
+                    const existing = taskIds.map((id) => state._allTasks.find((task) => task.id === id));
+                    if (existing.some(Boolean)) {
+                        const matches = existing.every((task, index) => {
+                            const plan = task && planCaptureModalRequest(requestFor(params, draft, lines[index], owned));
+                            return Boolean(task && plan?.success && isTaskOfDraft(task, plan, ids[0], lines[index], index === 0));
+                        });
+                        return matches
+                            ? { ok: true, value: { kind: 'saved', taskIds, close } }
+                            : fail('INVALID_INPUT', 'These capture IDs do not name the batch saved under them');
+                    }
+                    try {
+                        const projects = captureProjects(ids[0]);
+                        const outcome = await saveCaptureModalLines({
+                            lines,
+                            projects: owned,
+                            buildRequest,
+                            actions: {
+                                addProject: projects.addProject,
+                                addTasks: (items) => useTaskStore.getState().addTasks(items),
+                            },
+                            captureIds: ids,
+                        });
+                        if (projects.made.stale) return projectGone();
+                        if (outcome.kind !== 'saved') return notApplied(undefined);
+                        return { ok: true, value: { kind: 'saved', taskIds, close } };
+                    } catch (error) {
+                        return notApplied(error instanceof Error ? error.message : String(error));
+                    }
+                },
+            );
+            if (result.ok && result.value.kind === 'saved' && (draft.initialDestination || draft.destination)) {
+                logInfo('Native capture destination persisted', { scope: 'capture', force: true,
+                    context: { releaseCheck: 'v1.3.9/native-capture-destination', kind: 'modal-lines', outcome: 'saved' } });
+            }
+            return result;
+        },
+
+
+        discardCaptureModal(input: { params: CaptureModalParams }): NativeHostResult<{ close: NativeCaptureModalClose }> {
+            const ready = deps.readiness();
+            if (!ready.ok) return ready;
+            const params = isObjectRecord(input) ? readParams(input.params) : null;
+            if (!params) return fail('INVALID_INPUT', 'params must hold the screen\'s route params as text');
+            return { ok: true, value: { close: closeOf(params, readCaptureModalOrigin(params) === 'system') } };
+        },
+    };
+}
