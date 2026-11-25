@@ -1,0 +1,175 @@
+name: Windows CI
+
+# 两条互斥的触发路径：
+#   1) pull_request -> 只做 Windows 端“构建验证”（复刻原 ci.yml 的 desktop-native-windows），
+#      不产出、不上传任何预览产物。
+#   2) push 预览标签 (v*-rc.*) -> 构建 Windows 预览包并上传 artifact（仅内测用，不发布 Release）。
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    tags:
+      - 'v*-rc.*'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: windows-ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.head_ref) || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # PR：与原仓库完全一致的 Windows 原生验证（只编译 + 跑测试，不打包）
+  # ---------------------------------------------------------------------------
+  verify:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-2022
+    name: Windows build verify (Rust)
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: Ensure Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: Clear cached Whisper native build
+        run: cargo clean --locked --manifest-path apps/desktop/src-tauri/Cargo.toml -p whisper-rs-sys
+
+      - name: Run Windows native tests
+        env:
+          RUSTFLAGS: -C target-feature=-crt-static
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+  # ---------------------------------------------------------------------------
+  # 预览标签：构建 Windows 预览包（未签名），仅上传 artifact
+  # ---------------------------------------------------------------------------
+  preview:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-2022
+    name: Windows Preview (unsigned)
+    timeout-minutes: 60
+    env:
+      # 与 release-windows.yml 保持一致：避免生成只在高阶 CPU 上可用的二进制
+      GGML_NATIVE: "OFF"
+      GGML_AVX2: "OFF"
+      GGML_FMA: "OFF"
+      GGML_F16C: "OFF"
+      GGML_BMI2: "OFF"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version-file: ".bun-version"
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -e
+          bun install --frozen-lockfile || (
+            echo "bun install failed, clearing cache and retrying..."
+            (bun pm cache rm || true)
+            bun install --frozen-lockfile
+          )
+
+      - name: Resolve preview identity
+        id: identity
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
+          $conf = Get-Content 'apps/desktop/src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json
+          $version = [string]$conf.version
+          if ($tag -match '^v(.+)$') { $version = $Matches[1] }
+          $sha = $env:GITHUB_SHA.Substring(0, 7)
+          $label = "$version-preview.$sha"
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "label=$label" >> $env:GITHUB_OUTPUT
+          Write-Host "Preview label: $label"
+
+      - name: Build Windows preview
+        shell: pwsh
+        working-directory: apps/desktop
+        run: |
+          # beforeBuildCommand 会先跑 `tsc && vite build`，因此这一步同时充当类型检查
+          bunx tauri build
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $label = '${{ steps.identity.outputs.label }}'
+
+          $exe = 'apps/desktop/src-tauri/target/release/mindwtr.exe'
+          if (-not (Test-Path $exe)) { throw "Missing build output: $exe" }
+          $portable = "out/mindwtr_${label}_x64.exe"
+          Copy-Item $exe $portable -Force
+
+          $nsisDir = 'apps/desktop/src-tauri/target/release/bundle/nsis'
+          $installers = @(Get-ChildItem $nsisDir -Filter '*-setup.exe' -File -ErrorAction SilentlyContinue)
+          if ($installers.Count -eq 0) {
+            throw "Missing NSIS installer under $nsisDir"
+          }
+          foreach ($installer in $installers) {
+            Copy-Item $installer.FullName (Join-Path 'out' $installer.Name) -Force
+          }
+
+          Compress-Archive -Path $portable -DestinationPath "out/mindwtr_${label}_x64-portable.zip" -Force
+          Get-ChildItem out | Select-Object Name, @{n = 'MB'; e = { [math]::Round($_.Length / 1MB, 1) } } | Format-Table
+
+      - name: Upload preview artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: windows-preview-${{ steps.identity.outputs.label }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Write job summary
+        if: always() && steps.identity.outcome == 'success'
+        shell: pwsh
+        run: |
+          @(
+            '### Windows preview build'
+            ''
+            "- 标识：``${{ steps.identity.outputs.label }}``"
+            "- 触发：``${{ github.event_name }}`` / ``${{ github.ref_name }}``"
+            "- 产物：NSIS 安装包 + 便携 zip（**未签名**，首次运行需在 SmartScreen 中放行）"
+            "- 下载：本 run 页面底部 Artifacts 区域"
+          ) >> $env:GITHUB_STEP_SUMMARY
