@@ -5,6 +5,9 @@ node_modules/
 .bun-install/
 .bun-tmp/
 
+# Local toolchain & package caches (regenerable: bun install / .bun-version)
+.tools/
+
 # Build outputs
 dist/
 dist-electron/

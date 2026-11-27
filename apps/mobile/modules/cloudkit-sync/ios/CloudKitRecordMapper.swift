@@ -152,6 +152,7 @@ enum CloudKitRecordMapper {
         FieldSpec(jsKey: "purgedAt", ckKey: "purgedAt", kind: .date),
         FieldSpec(jsKey: "order", ckKey: "sortOrder", kind: .int),
         FieldSpec(jsKey: "orderNum", ckKey: "orderNum", kind: .int),
+        FieldSpec(jsKey: "links", ckKey: "links", kind: .jsonString),
     ]
 
 

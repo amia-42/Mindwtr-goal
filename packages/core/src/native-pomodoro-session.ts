@@ -1,7 +1,7 @@
 import { strToU8 } from 'fflate';
 import { createPomodoroState, resetPomodoroState, type PomodoroDurations, type PomodoroSessionHistory, type PomodoroState } from './pomodoro';
 import { pausePomodoroSession, resolvePomodoroSession, serializePomodoroSession, startPomodoroSession, type ResolvedPomodoroSession, type StoredPomodoroSession } from './pomodoro-session';
-import { TASK_SQLITE_COLUMNS } from './task-sync-schema';
+import { isLegacyTaskRowLayout, TASK_SQLITE_COLUMNS } from './task-sync-schema';
 import { addTimeSpentMinutes, normalizeTimeSpentMinutes, TIME_SPENT_MAX_MINUTES } from './time-spent';
 import { nextRevision } from './sync-revision';
 import { taskEditValuesEqual } from './json-value-equality';
@@ -266,13 +266,7 @@ const targetOf = (value: unknown, id: string | undefined): NativePomodoroTaskBef
     if (!id) { if (value !== null) invalid(); return null; }
     if (!exact(value, ['id', 'row']) || value.id !== id) invalid();
     if (value.row === null) return { id, row: null };
-    const legacyLayout = Array.isArray(value.row) && (value.row.length === NATIVE_POMODORO_SCHEMA4_TASK_COLUMNS.length
-            || (value.row.length === NATIVE_POMODORO_SCHEMA4_TASK_COLUMNS.length + 1
-                && TASK_SQLITE_COLUMNS[NATIVE_POMODORO_SCHEMA4_TASK_COLUMNS.length] === 'reminderPolicy')
-            || (value.row.length === NATIVE_POMODORO_SCHEMA4_TASK_COLUMNS.length + 2
-                && TASK_SQLITE_COLUMNS[NATIVE_POMODORO_SCHEMA4_TASK_COLUMNS.length] === 'reminderPolicy'
-                && TASK_SQLITE_COLUMNS[NATIVE_POMODORO_SCHEMA4_TASK_COLUMNS.length + 1] === 'dueReminderLeadMinutes'))
-        && NATIVE_POMODORO_SCHEMA4_TASK_COLUMNS.every((name, index) => TASK_SQLITE_COLUMNS[index] === name);
+    const legacyLayout = isLegacyTaskRowLayout(value.row, NATIVE_POMODORO_SCHEMA4_TASK_COLUMNS, TASK_SQLITE_COLUMNS);
     if (!Array.isArray(value.row) || (value.row.length !== TASK_SQLITE_COLUMNS.length && !legacyLayout) || value.row[0] !== id
         || !value.row.every((cell) => cell === null || typeof cell === 'string' || (typeof cell === 'number' && Number.isFinite(cell)))) invalid();
     return { id, row: [...value.row] as (string | number | null)[] };

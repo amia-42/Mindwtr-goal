@@ -5782,6 +5782,8 @@ pub(crate) fn sanitize_task_patch_map(patch: &mut Map<String, Value>) -> Result<
             "recurrence" => value.is_null() || valid_recurrence(value),
 
             "viewSectionIds" => value.is_null() || valid_view_section_ids(value),
+
+            "links" => value.is_null() || valid_task_links(value),
             _ => return Err(format!("Unsupported task field: {key}")),
         };
         if !valid {
@@ -5797,6 +5799,25 @@ fn valid_view_section_ids(value: &Value) -> bool {
     };
     map.values()
         .all(|entry| entry.as_str().is_some_and(|id| !id.trim().is_empty()))
+}
+
+fn valid_task_links(value: &Value) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+    if map
+        .keys()
+        .any(|key| !matches!(key.as_str(), "parents" | "children"))
+    {
+        return false;
+    }
+    map.values().all(|entry| {
+        entry.as_array().is_some_and(|items| {
+            items
+                .iter()
+                .all(|item| item.as_str().is_some_and(|id| !id.trim().is_empty()))
+        })
+    })
 }
 
 fn js_string_length(value: &str) -> usize {

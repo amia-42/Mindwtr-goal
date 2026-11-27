@@ -11,6 +11,7 @@ import { normalizeProjectLifecycleFields } from './project-status';
 import { isValidProjectRepeatInterval, normalizeProjectRepeatFields } from './project-sync-schema';
 import { logInfo } from './logger';
 import { normalizeTaskForLoad } from './task-status';
+import { normalizeTaskLinks } from './task-links';
 import { isTaskSectionProjectArchiveReference } from './store-helpers';
 import { SYNC_REPAIR_REV_BY } from './sync-types';
 import { MAX_SYNC_REVISION, isValidRevision, nextRevision, normalizeRevision } from './sync-revision';
@@ -250,6 +251,7 @@ export const normalizeTaskForSyncMerge = (
         projectId: normalized.projectId,
         sectionId: normalizeOptionalString(normalized.sectionId),
         viewSectionIds: normalized.viewSectionIds,
+        links: normalizeTaskLinks(normalized.links, normalized.id),
         areaId: normalized.areaId,
         isFocusedToday: normalizeSyncedBoolean(normalized.isFocusedToday),
         timeEstimate: normalized.timeEstimate,

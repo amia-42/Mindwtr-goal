@@ -1620,6 +1620,7 @@ export const TaskItem = memo(function TaskItem({
     const renderEditor = () => (
         <TaskItemEditor
             isModalEditor={isModalEditor}
+            taskId={task.id}
             t={t}
             draft={draft}
             setField={setField}

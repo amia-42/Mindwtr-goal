@@ -6,6 +6,7 @@ import { normalizeOptionalContainerId, resolveTaskContainerAssignment } from './
 import { resolveDefaultNewTaskAreaId } from './area-utils';
 import { normalizeCancellationTimestamp, normalizeTaskLifecycleFields } from './task-status';
 import { hasRecurrenceRule, normalizeRecurrenceForLoad } from './recurrence';
+import { normalizeTaskLinks } from './task-links';
 import { normalizeDueReminderLeadMinutes, normalizeStartReminderLeadMinutes, normalizeRepeatReminderMinutes } from './schedule-utils';
 import { resolveTaskFocusCreation } from './focus-star';
 import { isTaskFutureFocusCandidate, isTaskFutureFocusCandidateBeforeBoundary, type FocusDateLookup } from './task-utils';
@@ -74,6 +75,7 @@ export function buildNewTask({
     const reminderPolicy = normalizeTaskReminderPolicy(initialTaskProps.reminderPolicy)
         ?? (typeof initialTaskProps.suppressMindwtrReminders === 'boolean'
             ? getTaskReminderPolicy(initialTaskProps) : 'inherit');
+    const initialLinks = normalizeTaskLinks(initialTaskProps.links, id);
     let newTask: Task = {
         ...initialTaskProps,
         id,
@@ -97,6 +99,7 @@ export function buildNewTask({
 
 
         isFocusedToday: initialTaskProps.isFocusedToday ?? false,
+        ...(initialLinks ? { links: initialLinks } : {}),
         reminderPolicy,
         suppressMindwtrReminders: suppressLegacyTaskReminders({ reminderPolicy }, state.settings),
         ...referenceClears,

@@ -6,6 +6,7 @@ import { normalizeDueReminderLeadMinutes, normalizeStartReminderLeadMinutes } fr
 import type { Task } from './types';
 import { normalizeTaskStatus } from './task-status';
 import { isSingleTaskReminder, normalizeTaskReminderPolicy } from './task-reminder-policy';
+import { normalizeTaskLinks } from './task-links';
 import {
     fromBool,
     fromJson,
@@ -104,6 +105,16 @@ const TASK_SQLITE_COLUMN_ENTRIES: TaskSqliteColumnEntry[] = deriveTaskSqliteColu
 export const TASK_SQLITE_COLUMNS: readonly string[] = TASK_SQLITE_COLUMN_ENTRIES.map((entry) => entry.column);
 
 
+export const isLegacyTaskRowLayout = (
+    row: unknown,
+    baseColumns: readonly string[],
+    currentColumns: readonly string[] = TASK_SQLITE_COLUMNS,
+): boolean => Array.isArray(row)
+    && row.length >= baseColumns.length
+    && row.length < currentColumns.length
+    && baseColumns.every((name, index) => currentColumns[index] === name);
+
+
 export const TASK_SQLITE_MIGRATION_COLUMNS: readonly { name: string; sql: string }[] = TASK_SQLITE_COLUMN_ENTRIES
     .filter((entry) => entry.sqlType !== null)
     .map((entry) => ({ name: entry.column, sql: `ALTER TABLE tasks ADD COLUMN ${entry.column} ${entry.sqlType}` }));
@@ -152,6 +163,7 @@ const taskColumnValues = (task: Task): Record<string, unknown> => {
         projectId: task.projectId ?? null,
         sectionId: task.sectionId ?? null,
         viewSectionIds: toJson(task.viewSectionIds),
+        links: toJson(normalizeTaskLinks(task.links, task.id)),
         areaId: task.areaId ?? null,
 
 
@@ -188,6 +200,7 @@ export const taskFromSqliteRow = (row: Record<string, unknown>): Task => {
     const orderNumRaw = row.orderNum;
     const order = orderNumRaw === null || orderNumRaw === undefined ? undefined : Number(orderNumRaw);
     const loadedStatus = normalizeTaskStatus(String(row.status ?? ''));
+    const loadedId = String(row.id);
     return {
         id: String(row.id),
         title: String(row.title ?? ''),
@@ -218,6 +231,7 @@ export const taskFromSqliteRow = (row: Record<string, unknown>): Task => {
         projectId: (row.projectId as string | null) ?? undefined,
         sectionId: (row.sectionId as string | null) ?? undefined,
         viewSectionIds: fromJson<unknown>(row.viewSectionIds, undefined) as Task['viewSectionIds'],
+        links: normalizeTaskLinks(fromJson<unknown>(row.links, undefined), loadedId),
         areaId: (row.areaId as string | null) ?? undefined,
         order,
         orderNum: order,

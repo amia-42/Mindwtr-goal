@@ -5,6 +5,7 @@ import { normalizeTimeSpentMinutes } from './time-spent';
 import { normalizeRelativeStartOffset } from './task-relative-start';
 import { preserveShallowIdentity, sameShallowRecord } from './shallow-identity';
 import { safeParseDate } from './date';
+import { normalizeTaskLinks } from './task-links';
 import type { FocusDateProjection } from './task-utils';
 
 export const TASK_STATUS_VALUES: TaskStatus[] = ['inbox', 'next', 'waiting', 'someday', 'reference', 'done', 'archived'];
@@ -224,6 +225,10 @@ export function normalizeTaskForLoad(task: Task, nowIso: string = new Date().toI
         if (next.status !== 'next') next.isFocusedToday = false;
         next.focusOrder = undefined;
     }
+
+    const nextLinks = normalizeTaskLinks(rest.links, task.id);
+    if (nextLinks) next.links = preserveShallowIdentity(rest.links, nextLinks);
+    else delete next.links;
 
 
     return sameShallowRecord(task, next) ? task : next;

@@ -1,7 +1,7 @@
 import { strToU8 } from 'fflate';
 import { classifyAppleReminderForImport } from './apple-reminders-import-model';
 import { buildNewTask } from './task-creation';
-import { TASK_SQLITE_COLUMNS } from './task-sync-schema';
+import { isLegacyTaskRowLayout, TASK_SQLITE_COLUMNS } from './task-sync-schema';
 import { isNativeJsonWithinBytes } from './native-host-contract-task-view';
 import { taskEditValuesEqual } from './json-value-equality';
 import type { AppSettings, Area, Task } from './types';
@@ -75,9 +75,7 @@ const readRequest = (value: unknown): NativeAppleReminderImportRequest => {
 };
 const readTarget = (value: unknown, id: string): NativeAppleReminderImportTarget => {
     if (!exact(value, ['id', 'row']) || value.id !== id) invalid();
-    const legacyLayout = Array.isArray(value.row) && (value.row.length === SCHEMA5_TASK_COLUMNS.length
-        || (value.row.length === SCHEMA5_TASK_COLUMNS.length + 1 && TASK_SQLITE_COLUMNS[SCHEMA5_TASK_COLUMNS.length] === 'dueReminderLeadMinutes'))
-        && SCHEMA5_TASK_COLUMNS.every((name, index) => TASK_SQLITE_COLUMNS[index] === name);
+    const legacyLayout = isLegacyTaskRowLayout(value.row, SCHEMA5_TASK_COLUMNS, TASK_SQLITE_COLUMNS);
     if (value.row !== null && (!Array.isArray(value.row) || (value.row.length !== TASK_SQLITE_COLUMNS.length && !legacyLayout)
         || value.row[0] !== id || !value.row.every((cell) => cell === null || typeof cell === 'string'
             || (typeof cell === 'number' && Number.isFinite(cell))))) invalid();

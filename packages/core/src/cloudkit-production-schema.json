@@ -52,7 +52,9 @@
     "dueReminderLeadMinutes",
     "startReminderLeadMinutes"
    ],
-   "pendingProduction": []
+   "pendingProduction": [
+    "links"
+   ]
   },
   "MindwtrProject": {
    "deployed": [
