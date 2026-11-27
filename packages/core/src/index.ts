@@ -351,6 +351,8 @@ export * from './task-view-model';
 export * from './task-editor-schedule';
 export * from './shared-api-write-limits';
 export * from './task-query';
+export * from './task-links';
+export * from './task-hierarchy-graph';
 export * from './onboarding-guidance';
 export * from './first-run-onboarding';
 export * from './mobile-startup-prompts';

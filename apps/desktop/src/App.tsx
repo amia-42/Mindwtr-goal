@@ -10,6 +10,7 @@ import { ListView } from './components/views/ListView';
 import { CalendarView } from './components/views/CalendarView';
 const BoardView = lazy(() => import('./components/views/BoardView').then((m) => ({ default: m.BoardView })));
 const TimelineView = lazy(() => import('./components/views/TimelineView').then((m) => ({ default: m.TimelineView })));
+const HierarchyView = lazy(() => import('./components/views/HierarchyView').then((m) => ({ default: m.HierarchyView })));
 const ObsidianView = lazy(() => import('./components/views/ObsidianView').then((m) => ({ default: m.ObsidianView })));
 import { ContextsView } from './components/views/ContextsView';
 import { ProjectsView as ProjectsViewEager } from './components/views/ProjectsView';
@@ -1292,6 +1293,8 @@ function App() {
                 return <BoardView />;
             case 'timeline':
                 return <TimelineView />;
+            case 'hierarchy':
+                return <HierarchyView />;
             case 'obsidian':
                 return <ObsidianView />;
             case 'projects':

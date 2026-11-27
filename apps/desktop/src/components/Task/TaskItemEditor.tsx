@@ -33,6 +33,7 @@ import { FocusStarIcon } from '../FocusStarIcon';
 import { TaskEditorAiMenu, TaskEditorAiPanels } from './TaskEditorAiPanels';
 import type { useTaskItemAi } from './useTaskItemAi';
 import { TaskEditorSection } from './TaskEditorSection';
+import { TaskLinksSection } from './TaskLinksSection';
 
 interface TaskItemEditorProps {
     t: (key: string) => string;
@@ -40,6 +41,7 @@ interface TaskItemEditorProps {
     setField: TaskDraftSetter;
     autoFocusTitle?: boolean;
     isModalEditor?: boolean;
+    taskId?: string;
 
 
     ai: ReturnType<typeof useTaskItemAi>;
@@ -112,6 +114,7 @@ export function TaskItemEditor({
     setField,
     autoFocusTitle = false,
     isModalEditor = false,
+    taskId,
     ai,
     timeEstimatesEnabled,
     projects,
@@ -500,6 +503,7 @@ export function TaskItemEditor({
                     ))}
                 </div>
             )}
+            <TaskLinksSection taskId={taskId} t={t} />
             <div className="space-y-3">
                 {(schedulingFields.length > 0 || detailsFields.length > 0) && (
                     <ContextualHelp topic={schedulingOpen && schedulingFields.length > 0 ? 'scheduling' : 'details'} t={t} />

@@ -193,6 +193,7 @@ static const MWFieldSpec kTaskFields[] = {
     {"purgedAt",       "purgedAt",        MWFieldKindDate},
     {"order",          "sortOrder",       MWFieldKindInt},
     {"orderNum",       "orderNum",        MWFieldKindInt},
+    {"links",          "links",           MWFieldKindJsonString},
 };
 static const size_t kTaskFieldsCount = sizeof(kTaskFields) / sizeof(kTaskFields[0]);
 

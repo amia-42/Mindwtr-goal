@@ -1,5 +1,6 @@
 import { normalizeProjectCalendarReference } from './project-calendar-reference-schema';
 import { normalizeProjectRepeatFields } from './project-sync-schema';
+import { normalizeTaskLinksForComparison } from './task-links';
 import { normalizeTaskReminderPolicy } from './task-reminder-policy';
 import type { Area, Attachment, Person, Project, Section, Task } from './types';
 import { normalizeProjectSequentialScope, normalizeProjectTaskSortBy } from './project-utils';
@@ -116,6 +117,7 @@ export const normalizeTaskForContentComparison = (task: Task): Record<string, un
         projectId: task.projectId,
         sectionId: task.sectionId,
         viewSectionIds: canonicalizeStringMapForComparison(task.viewSectionIds),
+        links: normalizeTaskLinksForComparison(task.links),
         areaId: task.areaId,
         isFocusedToday: task.isFocusedToday ? true : undefined,
         timeEstimate: task.timeEstimate,

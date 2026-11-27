@@ -15,6 +15,7 @@ import {
     Trash2,
     History as HistoryIcon,
     BookOpen,
+    ListTree,
     AlertTriangle,
     Plus,
     RefreshCw,
@@ -319,6 +320,7 @@ export function Layout({
         'contexts',
         'search',
         'agenda',
+        'hierarchy',
         'obsidian',
     ]);
     const isWideView = wideViews.has(contentView);
@@ -326,6 +328,7 @@ export function Layout({
         'board',
         'projects',
         'contexts',
+        'hierarchy',
         'obsidian',
         'settings',
     ]);
@@ -356,6 +359,7 @@ export function Layout({
                 { id: 'calendar', labelKey: 'nav.calendar', icon: Calendar },
                 { id: 'review', labelKey: 'nav.review', icon: CheckCircle2 },
                 { id: 'contexts', labelKey: 'nav.contexts', icon: Tag },
+                { id: 'hierarchy', labelKey: 'nav.hierarchy', fallbackLabel: 'Hierarchy', icon: ListTree },
             ],
         },
         {

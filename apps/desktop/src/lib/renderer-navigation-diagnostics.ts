@@ -4,7 +4,7 @@ import { isLoggingEnabled, logInfo } from './app-log';
 
 const views = new Set([
     'inbox', 'agenda', 'next', 'waiting', 'someday', 'reference', 'history', 'done',
-    'archived', 'calendar', 'board', 'timeline', 'obsidian', 'projects', 'contexts',
+    'archived', 'calendar', 'board', 'timeline', 'hierarchy', 'obsidian', 'projects', 'contexts',
     'review', 'settings', 'trash',
 ]);
 const safeView = (view: string) => view.startsWith('savedSearch:') ? 'saved-search' : views.has(view) ? view : 'other';

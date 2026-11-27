@@ -9,6 +9,7 @@ export type DesktopViewId =
     | 'calendar'
     | 'board'
     | 'timeline'
+    | 'hierarchy'
     | 'obsidian'
     | 'projects'
     | 'contexts'

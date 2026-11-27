@@ -1,4 +1,4 @@
-export const SQLITE_SCHEMA_VERSION = 18;
+export const SQLITE_SCHEMA_VERSION = 19;
 
 
 export const SQLITE_BASE_SCHEMA = `
@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   updatedAt TEXT NOT NULL,
   deletedAt TEXT,
   purgedAt TEXT,
-  reminderPolicy TEXT
+  reminderPolicy TEXT,
+  links TEXT
 );
 
 CREATE TABLE IF NOT EXISTS projects (

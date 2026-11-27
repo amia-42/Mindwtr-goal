@@ -237,6 +237,11 @@ export interface RelativeStartOffset {
     unit: RelativeStartOffsetUnit;
 }
 
+export interface TaskLinks {
+    parents: string[];
+    children: string[];
+}
+
 export interface Task {
     id: string;
     title: string;
@@ -262,6 +267,7 @@ export interface Task {
     sectionId?: string;
     viewSectionIds?: ViewSectionIds;
     areaId?: string;
+    links?: TaskLinks;
     isFocusedToday?: boolean;
     timeEstimate?: TimeEstimate;
     timeSpentMinutes?: number;
