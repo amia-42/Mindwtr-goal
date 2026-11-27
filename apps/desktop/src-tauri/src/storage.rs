@@ -38,7 +38,7 @@ const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 const STORAGE_RETRY_ATTEMPTS: usize = 4;
 const STORAGE_RETRY_BASE_DELAY_MS: u64 = 120;
 
-const STORAGE_SCHEMA_VERSION: i64 = 20;
+const STORAGE_SCHEMA_VERSION: i64 = 21;
 const STORAGE_SCHEMA_STATE_TABLE: &str = "storage_schema_state";
 
 const FTS_TRIGGER_MIGRATION_VERSION: i64 = 4;
@@ -3572,10 +3572,11 @@ fn replace_prepared_data_in_transaction(
                 task.get("deletedAt").and_then(|v| v.as_str()),
                 task.get("purgedAt").and_then(|v| v.as_str()),
                 task.get("timeSpentMinutes").and_then(|v| v.as_i64()),
-            task.get("archivedAt").and_then(|v| v.as_str()),
-            task.get("reminderPolicy").and_then(Value::as_str).filter(|policy| matches!(*policy, "inherit" | "send" | "skip" | "start" | "due")),
-            task.get("dueReminderLeadMinutes").and_then(Value::as_i64).filter(|minutes| (0..=10080).contains(minutes)),
-            task.get("startReminderLeadMinutes").and_then(Value::as_i64).filter(|minutes| matches!(minutes, 0 | 5 | 15 | 30 | 60)),
+                task.get("archivedAt").and_then(|v| v.as_str()),
+                task.get("reminderPolicy").and_then(Value::as_str).filter(|policy| matches!(*policy, "inherit" | "send" | "skip" | "start" | "due")),
+                task.get("dueReminderLeadMinutes").and_then(Value::as_i64).filter(|minutes| (0..=10080).contains(minutes)),
+                task.get("startReminderLeadMinutes").and_then(Value::as_i64).filter(|minutes| matches!(minutes, 0 | 5 | 15 | 30 | 60)),
+                json_str(task.get("links")),
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -6821,7 +6822,7 @@ mod tests {
     fn due_advance_migrates_and_round_trips_explicit_off() {
         use serde_json::json;
         let mut conn = Connection::open_in_memory().unwrap();
-        let legacy_schema = SQLITE_SCHEMA.replace("  reminderPolicy TEXT,\n  dueReminderLeadMinutes INTEGER,\n  startReminderLeadMinutes INTEGER\n);", "  reminderPolicy TEXT\n);");
+        let legacy_schema = SQLITE_SCHEMA.replace("  reminderPolicy TEXT,\n  dueReminderLeadMinutes INTEGER,\n  startReminderLeadMinutes INTEGER,\n  links TEXT\n);", "  reminderPolicy TEXT\n);");
         assert_ne!(legacy_schema, SQLITE_SCHEMA);
         conn.execute_batch(&legacy_schema).unwrap();
         let generation = sqlite_schema_generation(&conn).unwrap();
@@ -6844,7 +6845,7 @@ mod tests {
         use serde_json::json;
         let mut conn = Connection::open_in_memory().unwrap();
         let legacy_schema = SQLITE_SCHEMA.replace(
-            "  dueReminderLeadMinutes INTEGER,\n  startReminderLeadMinutes INTEGER\n);",
+            "  dueReminderLeadMinutes INTEGER,\n  startReminderLeadMinutes INTEGER,\n  links TEXT\n);",
             "  dueReminderLeadMinutes INTEGER\n);",
         );
         assert_ne!(legacy_schema, SQLITE_SCHEMA);
@@ -6884,7 +6885,7 @@ mod tests {
     fn reminder_policy_migration_keeps_legacy_absence_and_round_trips_new_values() {
         let mut conn = Connection::open_in_memory().unwrap();
         let legacy_schema = SQLITE_SCHEMA.replace(
-            "  purgedAt TEXT,\n  reminderPolicy TEXT,\n  dueReminderLeadMinutes INTEGER,\n  startReminderLeadMinutes INTEGER\n);",
+            "  purgedAt TEXT,\n  reminderPolicy TEXT,\n  dueReminderLeadMinutes INTEGER,\n  startReminderLeadMinutes INTEGER,\n  links TEXT\n);",
             "  purgedAt TEXT\n);",
         );
         assert_ne!(legacy_schema, SQLITE_SCHEMA);
