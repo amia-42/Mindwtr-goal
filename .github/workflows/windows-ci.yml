@@ -1,5 +1,6 @@
 name: Windows CI
 
+# 触发条件、标签推送步骤与产物说明：docs/development/windows-ci.md
 # 两条互斥的触发路径：
 #   1) pull_request -> 只做 Windows 端“构建验证”（复刻原 ci.yml 的 desktop-native-windows），
 #      不产出、不上传任何预览产物。
